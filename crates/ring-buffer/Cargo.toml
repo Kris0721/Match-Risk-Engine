@@ -1,0 +1,13 @@
+[package]
+name = "ring-buffer"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+crossbeam-utils = "0.8"
+loom = { version = "0.7", optional = true }
+
+[dev-dependencies]
+
+[features]
+loom = ["dep:loom"]

@@ -1,0 +1,21 @@
+[package]
+name = "order-book"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+core-types = { path = "../core-types" }
+slotmap = "1"
+smallvec = "1"
+
+[dev-dependencies]
+loom = { version = "0.7", features = ["checkpoint"] }
+rand = "0.8"
+
+[[test]]
+name = "matching_unit"
+path = "src/tests/matching_unit.rs"
+
+[[test]]
+name = "diff_fuzz"
+path = "src/tests/diff_fuzz.rs"

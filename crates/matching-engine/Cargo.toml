@@ -1,0 +1,15 @@
+[package]
+name = "matching-engine"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+core-types = { path = "../core-types" }
+order-book = { path = "../order-book" }
+risk-engine = { path = "../risk-engine" }
+seqlock = { path = "../seqlock" }
+ring-buffer = { path = "../ring-buffer" }
+wal = { path = "../wal" }
+logger = { path = "../logger" }
+
+[dev-dependencies]

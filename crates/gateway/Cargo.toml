@@ -1,0 +1,16 @@
+[package]
+name = "gateway"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+core-types = { path = "../core-types" }
+ring-buffer = { path = "../ring-buffer" }
+logger = { path = "../logger" }
+
+tokio = { version = "1", features = ["net", "rt-multi-thread", "macros", "sync", "time", "io-util"] }
+bytes = "1"
+thiserror = "1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["test-util"] }

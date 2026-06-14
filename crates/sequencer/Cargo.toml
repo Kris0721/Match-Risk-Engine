@@ -1,0 +1,15 @@
+[package]
+name = "sequencer"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+core-types = { path = "../core-types" }
+ring-buffer = { path = "../ring-buffer" }
+crossbeam-utils = "0.8"
+loom = { version = "0.7", optional = true }
+
+[dev-dependencies]
+
+[features]
+loom = ["dep:loom"]

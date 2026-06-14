@@ -1,0 +1,9 @@
+[package]
+name = "metrics"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+core-types = { path = "../core-types" }
+matching-engine = { path = "../matching-engine" }
+risk-engine = { path = "../risk-engine" }

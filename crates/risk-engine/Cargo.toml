@@ -1,0 +1,10 @@
+[package]
+name = "risk-engine"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+core-types = { path = "../core-types" }
+ring-buffer = { path = "../ring-buffer" }
+seqlock = { path = "../seqlock" }
+crossbeam-utils = "0.8"

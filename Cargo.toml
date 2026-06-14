@@ -1,0 +1,30 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/core-types",
+    "crates/ring-buffer",
+    "crates/seqlock",
+    "crates/order-book",
+    "crates/matching-engine",
+    "crates/sequencer",
+    "crates/risk-engine",
+    "crates/wal",
+    "crates/gateway",
+    "crates/sim",
+    "crates/metrics",
+    "crates/logger",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+debug = false
+
+[profile.dev]
+opt-level = 1
