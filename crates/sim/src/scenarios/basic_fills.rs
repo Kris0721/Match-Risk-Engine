@@ -3,6 +3,7 @@
 //! and that both accounts' positions are updated by the risk engine.
 
 use core_types::{AccountId, InboundCommand, OrderType, Price, Qty, Side, Symbol};
+use core_types::OrderType as _OrderType;
 use crate::harness::{SimConfig, SimHarness};
 
 pub fn run() {
@@ -18,21 +19,25 @@ pub fn run() {
     // Account 0 places a resting limit sell @ 50,000.
     harness.push_command(InboundCommand::NewOrder {
         account:    AccountId(0),
+        client_order_id: core_types::ClientOrderId::new(0),
         symbol:     Symbol(0),
         side:       Side::Sell,
         price:      Price(50_000_00000000),
         qty:        Qty(1_00000000),
-        order_type: OrderType::Limit,
+        order_type: OrderType::Limit { price: Price(50_000_00000000) },
+        time_in_force: core_types::TimeInForce::Gtc,
     });
 
     // Account 1 places an aggressive limit buy @ 50,000 (crosses the spread).
     harness.push_command(InboundCommand::NewOrder {
         account:    AccountId(1),
+        client_order_id: core_types::ClientOrderId::new(0),
         symbol:     Symbol(0),
         side:       Side::Buy,
         price:      Price(50_000_00000000),
         qty:        Qty(1_00000000),
-        order_type: OrderType::Limit,
+        order_type: OrderType::Limit { price: Price(50_000_00000000) },
+        time_in_force: core_types::TimeInForce::Gtc,
     });
 
     harness.set_mark_price(Symbol(0), Price(50_000_00000000));

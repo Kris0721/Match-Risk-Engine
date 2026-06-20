@@ -2,6 +2,7 @@ pub mod affinity;
 pub mod engine;
 pub mod metrics;
 pub mod risk_check;
+pub mod mapper;
 
 pub use engine::{EngineConfig, MatchingEngine};
 pub use metrics::EngineMetrics;

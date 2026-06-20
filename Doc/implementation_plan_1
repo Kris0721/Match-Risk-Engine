@@ -163,3 +163,11 @@ cargo test --workspace 2>&1
 > 2. Merge them into a single unified type hierarchy (simpler but loses the separation)
 >
 > I recommend option 1 since the gateway needs its own clean wire-protocol types distinct from the engine-internal sequenced types.
+
+## Progress update (2026-06-19)
+- Category A: A1 fixed and marked done (ring-buffer lib.rs typo).
+- Category C: All Category C items implemented and recorded as done in session todos.
+- Category B: 26 todos created; B1 (order-book apply) set in_progress. Changes applied across crates: core-types (NewOrder.price, OrderType/TIF split), order-book (apply borrows and TIF handling), risk-engine numeric and seqlock fixes, gateway ring-buffer/producer fixes, and WAL serialization switched from rkyv to bincode/serde for compatibility.
+- WAL: removed rkyv-dependent derives from core-types and migrated wal to serde/bincode for stable workspace builds.
+- Repo state: many compile errors addressed; remaining blockers include WAL recovery adjustments, matching-engine API mismatches, and a few enum/variant mapping updates.
+- Next steps: finish WAL recovery path, reconcile matching-engine imports/APIs, run iterative `cargo check` until workspace is clean. Session todos updated to reflect progress (22 pending, 1 in_progress, 9 done).

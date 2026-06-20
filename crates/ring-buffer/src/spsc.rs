@@ -71,23 +71,28 @@ pub struct SpscProducer<T, const CAP: usize> {
     /// Cached local copy of head to avoid redundant atomic loads.
     cached_head: usize,
    // !Sync by construction: this type must not be shared across threads.
-   // PhantomData<*const ()> makes the compiler infer !Sync + !Send without
+   // PhantomData<*const ()> makes the compiler infer !Sync without
    // requiring the unstable negative_impls feature.
    _not_sync: std::marker::PhantomData<*const ()>,
 }
- 
+  
 /// The consuming end of an SPSC queue. `!Sync` — must not be shared across threads.
 pub struct SpscConsumer<T, const CAP: usize> {
     shared: Arc<Shared<T, CAP>>,
     /// Cached local copy of tail to avoid redundant atomic loads.
     cached_tail: usize,
     // !Sync by construction: this type must not be shared across threads.
-    // PhantomData<*const ()> makes the compiler infer !Sync + !Send without
+    // PhantomData<*const ()> makes the compiler infer !Sync without
     // requiring the unstable negative_impls feature.
     _not_sync: std::marker::PhantomData<*const ()>,
 }
- 
+
 // Explicitly not Sync.
+
+// Allow sending producer/consumer between threads (they are single-owner
+// ends of the queue). They must NOT be shared (hence still !Sync).
+unsafe impl<T: Send, const CAP: usize> Send for SpscProducer<T, CAP> {}
+unsafe impl<T: Send, const CAP: usize> Send for SpscConsumer<T, CAP> {}
 
 
 /// Construct a new SPSC queue of capacity `CAP` (must be a power of two).

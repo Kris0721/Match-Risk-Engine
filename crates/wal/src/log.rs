@@ -44,8 +44,6 @@ use std::fs::{File, OpenOptions};
 use std::path::Path;
 
 use memmap2::MmapMut;
-use rkyv::{Archive, Serialize, Deserialize};
-use rkyv::ser::serializers::AllocSerializer;
 use crc32fast::Hasher as Crc32Hasher;
 use thiserror::Error;
 
@@ -142,7 +140,6 @@ pub struct FileWalWriter {
     last_seq: u64,
 }
 
-impl !Sync for FileWalWriter {}
 
 impl FileWalWriter {
     /// Open or create a WAL file at `path`.
@@ -318,19 +315,9 @@ fn scan_to_end(mmap: &[u8]) -> Result<(usize, u64), WalError> {
     Ok((offset, last_seq))
 }
 
-/// Inline stack-allocated rkyv serialisation of `InboundCommand`.
-fn serialise_command(cmd: &InboundCommand) -> Result<[u8; MAX_PAYLOAD], WalError> {
-    let mut buf = [0u8; MAX_PAYLOAD];
-    let serialised = rkyv::to_bytes::<_, 256>(cmd)
-        .map_err(|e| WalError::Serialise(e.to_string()))?;
-    if serialised.len() > MAX_PAYLOAD {
-        return Err(WalError::Serialise(format!(
-            "serialised command too large: {} > {}",
-            serialised.len(), MAX_PAYLOAD
-        )));
-    }
-    buf[..serialised.len()].copy_from_slice(&serialised);
-    Ok(buf)
+/// Serialize `InboundCommand` using bincode into a Vec<u8>.
+fn serialise_command(cmd: &InboundCommand) -> Result<Vec<u8>, WalError> {
+    bincode::serialize(cmd).map_err(|e| WalError::Serialise(e.to_string()))
 }
 
 /// CRC32 of a byte slice.
@@ -361,11 +348,13 @@ mod tests {
             ts_ns: seq * 1_000,
             cmd: InboundCommand::NewOrder {
                 account:    AccountId(1),
+                client_order_id: core_types::ClientOrderId::new(0),
                 symbol:     Symbol(0),
                 side:       Side::Buy,
                 price:      Price(100_00000000),
                 qty:        Qty(1_00000000),
                 order_type: OrderType::Limit,
+                time_in_force: core_types::TimeInForce::Gtc,
             },
         }
     }

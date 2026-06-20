@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use bytes::BytesMut;
 use core_types::{AccountId, Command, Event};
-use ring_buffer::spsc::{self, Producer};
+use ring_buffer::{spsc, SpscProducer};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::broadcast;
@@ -48,7 +48,7 @@ impl Default for GatewayConfig {
 /// supply an in-memory factory.
 pub struct GatewayServer<F>
 where
-    F: Fn(SessionId) -> Producer<Command> + Send + Sync + 'static,
+    F: Fn(SessionId) -> SpscProducer<Command, 4096> + Send + Sync + 'static,
 {
     config: GatewayConfig,
     market_data: Arc<MarketDataHub>,
@@ -58,7 +58,7 @@ where
 
 impl<F> GatewayServer<F>
 where
-    F: Fn(SessionId) -> Producer<Command> + Send + Sync + 'static,
+    F: Fn(SessionId) -> SpscProducer<Command, 4096> + Send + Sync + 'static,
 {
     pub fn new(config: GatewayConfig, market_data: Arc<MarketDataHub>, cmd_producer_factory: F) -> Self {
         GatewayServer {
@@ -113,7 +113,7 @@ async fn handle_connection(
     stream: TcpStream,
     session_id: SessionId,
     peer_addr: SocketAddr,
-    cmd_producer: Producer<Command>,
+    cmd_producer: SpscProducer<Command, 4096>,
     market_data: Arc<MarketDataHub>,
     read_buf_capacity: usize,
 ) -> std::io::Result<()> {

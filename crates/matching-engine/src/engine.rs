@@ -6,18 +6,20 @@
 
 use std::time::Instant;
 
-use core_types::commands::{Command, NewOrder};
-use core_types::events::{Event, ExecutionReport, OrderRejected};
-use core_types::ids::AccountId;
+use core_types::{InboundCommand, SequencedCommand};
+use core_types::events::{EngineEvent, Event, Fill, RejectReason, CancelReason};
+use core_types::ids::{AccountId, InstrumentId, OrderId, SequenceNo};
 use core_types::price::Price;
 
 use order_book::book::OrderBook;
-use ring_buffer::spsc::{SpscConsumer, SpscProducer};
+use ring_buffer::{spsc_queue, SpscConsumer, SpscProducer};
 use seqlock::account_risk_state::AccountRiskStateWriter;
 use wal::log::WalWriter;
 
 use crate::metrics::EngineMetrics;
 use crate::risk_check::{check_new_order, RiskRejectReason, Tier0Limits};
+
+use crate::mapper::map_engine_event;
 
 /// Configuration for a single matching engine shard (one instrument,
 /// or a fixed set of instruments depending on sharding strategy).
@@ -32,8 +34,8 @@ pub struct EngineConfig {
 pub struct MatchingEngine<W: WalWriter> {
     config: EngineConfig,
     book: OrderBook,
-    inbound: SpscConsumer<Command>,
-    outbound: SpscProducer<Event>,
+    inbound: SpscConsumer<SequencedCommand, 1024>,
+    outbound: SpscProducer<Event, 1024>,
     risk_state: AccountRiskStateWriter,
     wal: W,
     metrics: EngineMetrics,
@@ -45,8 +47,8 @@ impl<W: WalWriter> MatchingEngine<W> {
     pub fn new(
         config: EngineConfig,
         book: OrderBook,
-        inbound: SpscConsumer<Command>,
-        outbound: SpscProducer<Event>,
+        inbound: SpscConsumer<SequencedCommand, 1024>,
+        outbound: SpscProducer<Event, 1024>,
         risk_state: AccountRiskStateWriter,
         wal: W,
     ) -> Self {
@@ -92,78 +94,73 @@ impl<W: WalWriter> MatchingEngine<W> {
     /// Process a single inbound command. Public for use by the
     /// deterministic simulation harness (`sim` crate), which drives the
     /// engine without a real ring buffer thread.
-    pub fn handle_command(&mut self, cmd: Command) {
+    pub fn handle_command(&mut self, cmd: SequencedCommand) {
         let start = Instant::now();
 
-        match cmd {
-            Command::NewOrder(order) => self.handle_new_order(order),
-            Command::CancelOrder(cancel) => {
-                let events = self.book.cancel(cancel.order_id);
-                for ev in events {
-                    self.publish_and_log(ev);
+        match cmd.cmd {
+            InboundCommand::NewOrder { account, client_order_id, symbol, side, price, qty, order_type, time_in_force } => {
+                // Build a NewOrder-like struct for the risk check.
+                let new_order = core_types::NewOrder {
+                    account_id: account,
+                    instrument_id: core_types::InstrumentId(symbol.0.into()),
+                    client_order_id,
+                    side,
+                    price: price,
+                    order_type,
+                    qty,
+                    time_in_force,
+                };
+
+                let risk_start = Instant::now();
+                let risk_result = {
+                    let state = self.risk_state.inner();
+                    crate::risk_check::check_new_order(&new_order, account, &self.config.limits, state, self.reference_price)
+                };
+                self.metrics.risk_check_latency.record(risk_start.elapsed());
+
+                match risk_result {
+                    Ok(()) => {
+                        let engine_events = self.book.apply(cmd);
+                        let mut n_fills: u64 = 0;
+                        for ev in engine_events {
+                            if let Some(out_ev) = map_engine_event(ev) {
+                                if matches!(out_ev, Event::Filled { .. }) {
+                                    n_fills += 1;
+                                }
+                                self.publish_and_log(out_ev);
+                            }
+                        }
+                        self.metrics.record_order(n_fills, false);
+                    }
+                    Err(reason) => {
+                        self.metrics.record_order(0, true);
+                        // Build a Rejected event to publish
+                        let seq_no = SequenceNo::new(cmd.seq).unwrap_or(SequenceNo::FIRST);
+                        let ev = Event::Rejected { seq: seq_no, account_id: account, client_order_id, reason: core_types::events::RejectReason::RiskLimitBreach };
+                        self.publish_and_log(ev);
+                    }
                 }
             }
-            Command::ReplaceOrder(replace) => {
-                let events = self.book.replace(replace);
+            InboundCommand::Cancel { account, order_id } => {
+                let events = self.book.apply(cmd);
                 for ev in events {
-                    self.publish_and_log(ev);
+                    if let Some(out_ev) = map_engine_event(ev) {
+                        self.publish_and_log(out_ev);
+                    }
                 }
             }
-            Command::SetReferencePrice(px) => {
-                self.reference_price = Some(px);
+            _ => {
+                // Other command types (Liquidate, FreezeAccount) are forwarded
+                let events = self.book.apply(cmd);
+                for ev in events {
+                    if let Some(out_ev) = map_engine_event(ev) {
+                        self.publish_and_log(out_ev);
+                    }
+                }
             }
         }
 
         self.metrics.match_latency.record(start.elapsed());
-    }
-
-    fn handle_new_order(&mut self, order: NewOrder) {
-        let account = self.account_for_order(&order);
-
-        let risk_start = Instant::now();
-        let risk_result = {
-            let state = self.risk_state.current();
-            check_new_order(&order, account, &self.config.limits, state, self.reference_price)
-        };
-        self.metrics.risk_check_latency.record(risk_start.elapsed());
-
-        match risk_result {
-            Ok(()) => {
-                let fills = self.book.apply_new_order(order);
-                let n_fills = fills
-                    .iter()
-                    .filter(|e| matches!(e, Event::ExecutionReport(ExecutionReport { .. })))
-                    .count() as u64;
-
-                for ev in &fills {
-                    if let Event::ExecutionReport(report) = ev {
-                        self.risk_state.apply_fill(account, report);
-                    }
-                }
-
-                for ev in fills {
-                    self.publish_and_log(ev);
-                }
-
-                self.metrics.record_order(n_fills, false);
-            }
-            Err(reason) => {
-                self.metrics.record_order(0, true);
-                let ev = Event::OrderRejected(OrderRejected {
-                    order_id: order.order_id,
-                    reason: reject_reason_code(reason),
-                });
-                self.publish_and_log(ev);
-            }
-        }
-    }
-
-    /// Resolve the account associated with an order. In this simplified
-    /// shard model, account routing is carried in the order id's high
-    /// bits by the gateway; production code would look this up from a
-    /// session table.
-    fn account_for_order(&self, order: &NewOrder) -> AccountId {
-        AccountId((order.order_id.0 >> 48) as u32)
     }
 
     fn publish_and_log(&mut self, ev: Event) {
@@ -204,13 +201,13 @@ mod tests {
     use wal::log::NullWal;
 
     fn mk_engine() -> MatchingEngine<NullWal> {
-        let (_in_tx, in_rx) = channel::<Command>(1024);
-        let (out_tx, _out_rx) = channel::<Event>(1024);
+        let (_in_tx, in_rx) = spsc_queue::<SequencedCommand, 1024>();
+        let (out_tx, _out_rx) = spsc_queue::<Event, 1024>();
         let risk_state = AccountRiskStateWriter::new();
 
         MatchingEngine::new(
             EngineConfig { limits: Tier0Limits::default(), pin_core: None },
-            OrderBook::new(InstrumentId(1)),
+            OrderBook::new(core_types::InstrumentId(1)),
             in_rx,
             out_tx,
             risk_state,
@@ -222,16 +219,9 @@ mod tests {
     fn accepts_and_books_resting_order() {
         let mut engine = mk_engine();
 
-        let order = NewOrder {
-            order_id: OrderId(1 << 48),
-            instrument: InstrumentId(1),
-            side: Side::Buy,
-            order_type: OrderType::Limit,
-            price: Some(Price::from_raw(100)),
-            qty: Qty::from_raw(10),
-        };
+        let seq_cmd = SequencedCommand { seq: 1, ts_ns: 0, cmd: InboundCommand::NewOrder { account: AccountId(1), client_order_id: core_types::ClientOrderId::new(0), symbol: core_types::Symbol(1), side: Side::Buy, price: Price::from_raw(100), qty: Qty::from_raw(10), order_type: OrderType::Limit, time_in_force: core_types::TimeInForce::Gtc } };
 
-        engine.handle_command(Command::NewOrder(order));
+        engine.handle_command(seq_cmd);
 
         let snap = engine.metrics().snapshot();
         assert_eq!(snap.orders_processed, 1);

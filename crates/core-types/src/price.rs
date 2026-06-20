@@ -1,11 +1,11 @@
-// Price definitions and operations
+﻿// Price definitions and operations
 use std::fmt;
 use std::ops::{Add, Sub, Neg};
 
 /// Fixed-point price represented as an integer number of "ticks".
 ///
 /// The actual decimal scale (tick size) is defined per-instrument and
-/// is NOT encoded here — this keeps `Price` a plain `i64` for max
+/// is NOT encoded here â€” this keeps `Price` a plain `i64` for max
 /// performance. Conversion to/from decimal happens at the edges
 /// (gateway / market data), never on the matching hot path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
@@ -112,3 +112,4 @@ mod tests {
         assert!(Price::ZERO < Price::new(1));
     }
 }
+

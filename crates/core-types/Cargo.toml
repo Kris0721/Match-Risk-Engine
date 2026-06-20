@@ -1,10 +1,12 @@
-[package]
+﻿[package]
 name = "core-types"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
 serde = { version = "1", features = ["derive"], optional = true }
+rkyv = { version = "0.7" }
+rkyv_derive = "0.7"
 
 [features]
 default = []

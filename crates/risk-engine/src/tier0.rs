@@ -52,7 +52,8 @@ pub fn check(
 
     // 4. Rough margin check: will this order's initial margin fit within
     //    available balance?  (Full mark-to-market check happens on the shard.)
-    let order_notional = price.0.saturating_mul(qty.0) / 100_000_000;
+    let qty_i: i64 = qty.0 as i64;
+    let order_notional = price.0.saturating_mul(qty_i) / 100_000_000;
     let required_margin = order_notional
         .saturating_mul(limits.initial_margin_fraction)
         / 1_000_000; // scale back from 1e6 fraction representation

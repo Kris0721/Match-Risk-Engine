@@ -1,4 +1,4 @@
-// Output events emitted by the matching risk engine
+﻿// Output events emitted by the matching risk engine
 use crate::{AccountId, ClientOrderId, InstrumentId, OrderId, Price, Qty, SequenceNo, Side, Symbol};
 
 /// Reason an order was removed from the book / rejected, used in
@@ -49,7 +49,7 @@ pub struct Fill {
     /// The resting order that was matched against (maker).
     pub resting_order_id: OrderId,
     pub resting_account_id: AccountId,
-    /// Execution price — always the resting order's price (price-time
+    /// Execution price â€” always the resting order's price (price-time
     /// priority convention: maker sets the price).
     pub price: Price,
     pub qty: Qty,
@@ -59,7 +59,7 @@ pub struct Fill {
     pub aggressor_remaining_qty: Qty,
 }
 
-/// Top-level event enum — output of the matching engine, consumed by
+/// Top-level event enum â€” output of the matching engine, consumed by
 /// the risk engine, WAL, gateway (for execution reports), and metrics.
 ///
 /// Every event carries the `SequenceNo` of the command that produced
@@ -113,7 +113,7 @@ pub enum Event {
 }
 
 impl Event {
-    /// Returns the sequence number associated with this event —
+    /// Returns the sequence number associated with this event â€”
     /// every variant carries one, used for ordering during WAL replay.
     #[inline]
     pub const fn seq(&self) -> SequenceNo {
@@ -134,18 +134,58 @@ impl Event {
 ///
 /// Unlike `Event` (the gateway wire-protocol type), `EngineEvent` is
 /// used internally between the order book, sequencer, risk engine, and
-/// simulation harness. It is designed to be `Copy`-able and
-/// cache-friendly for the hot path.
+/// simulation harness. It is designed to be cache-friendly for the hot path.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub enum EngineEvent {
+    // Common trade representation used across the codebase. Different
+    // components reference different field names â€” keep a superset so both
+    // dialects can construct / pattern-match without changing callers.
     Trade {
-        seq: u64, symbol: Symbol,
-        maker_order_id: OrderId, taker_order_id: OrderId,
-        maker_acct: AccountId, taker_acct: AccountId,
-        maker_side: Side, price: Price, qty: Qty,
+        seq: u64,
+        ts_ns: u64,
+        symbol: Symbol,
+        price: Price,
+        qty: Qty,
+        maker_order: OrderId,
+        taker_order: OrderId,
+        maker_order_id: OrderId,
+        taker_order_id: OrderId,
+        maker_acct: AccountId,
+        taker_acct: AccountId,
+        maker_side: Side,
+        maker_remaining_qty: Qty,
+        taker_remaining_qty: Qty,
     },
-    OrderCancelled { seq: u64, order_id: OrderId, account: AccountId, symbol: Symbol },
-    OrderRejected  { seq: u64, account: AccountId, symbol: Symbol, reason: RejectReason },
+
+    // Variants matching the order-book's wire of engine-internal events.
+    Accepted { seq: u64, order_id: OrderId, ts_ns: u64, symbol: Symbol, account_id: AccountId, client_order_id: ClientOrderId, side: Side, price: Price, qty: Qty },
+    Rejected { seq: u64, order_id: OrderId, account_id: AccountId, client_order_id: ClientOrderId, reason: RejectReason },
+    Cancelled { seq: u64, order_id: OrderId },
+    BookTop { seq: u64, symbol: Symbol, bid: Option<Price>, ask: Option<Price> },
+
+    /// Acknowledgement that an order has been assigned an engine-wide id
+    /// and accepted (useful for gateway execution reports / client acks).
+    OrderAcknowledged {
+        order_id: OrderId,
+        account_id: AccountId,
+        seq: u64,
+    },
+
+    /// Higher-level, documented dialect variants used by some components.
+    OrderCancelled {
+        order_id: OrderId,
+        account_id: AccountId,
+        seq: u64,
+        symbol: Symbol,
+    },
+    OrderRejected {
+        order_id: OrderId,
+        account_id: AccountId,
+        reason: RejectReason,
+        seq: u64,
+        symbol: Symbol,
+    },
+
     SnapshotMarker { seq: u64 },
 }
 
@@ -184,3 +224,5 @@ mod tests {
         }
     }
 }
+
+

@@ -325,11 +325,13 @@ mod tests {
     fn new_order(symbol: Symbol) -> InboundCommand {
         InboundCommand::NewOrder {
             account: AccountId(1),
+            client_order_id: core_types::ClientOrderId::new(0),
             symbol,
             side: Side::Buy,
             price: Price(100_00000000),
             qty: Qty(1_00000000),
             order_type: OrderType::Limit,
+            time_in_force: core_types::TimeInForce::Gtc,
         }
     }
 

@@ -28,7 +28,7 @@ use core_types::{
     AccountId, EngineEvent, InboundCommand, OrderType,
     Price, Qty, SequencedCommand, Side, Symbol,
 };
-use order_book::Book;
+use order_book::{OrderBook, book::BookConfig};
 use risk_engine::{RiskShard, ShardConfig, MarkPrices};
 use seqlock::AccountRiskState;
 
@@ -85,18 +85,25 @@ pub struct SimResult {
 
 /// Simulated per-symbol matching engine state.
 struct SimEngine {
-    book:   Book,
+    book:   OrderBook,
     symbol: Symbol,
 }
-
+ 
 impl SimEngine {
     fn new(symbol: Symbol) -> Self {
-        Self { book: Book::new(symbol), symbol }
+        // Choose a conservative ladder size and arena capacity for the sim.
+        let cfg = BookConfig {
+            symbol,
+            tick_floor: Price::ZERO,
+            num_ticks: 1024,
+            arena_capacity: 4096,
+        };
+        Self { book: OrderBook::new(cfg), symbol }
     }
-
+ 
     /// Process one `SequencedCommand` and return any emitted events.
     fn step(&mut self, cmd: SequencedCommand) -> Vec<EngineEvent> {
-        self.book.apply(cmd)
+        self.book.apply(cmd).into_iter().collect()
     }
 }
 

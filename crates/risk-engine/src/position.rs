@@ -28,8 +28,8 @@ impl Position {
         debug_assert!(qty.0 > 0, "fill qty must be positive");
 
         let signed_qty: i64 = match side {
-            Side::Buy  =>  qty.0,
-            Side::Sell => -qty.0,
+            Side::Buy  =>  qty.0 as i64,
+            Side::Sell => -(qty.0 as i64),
         };
 
         let prev_qty = self.net_qty;
@@ -47,7 +47,7 @@ impl Position {
             // avg = (prev_avg * |prev_qty| + price * qty) / |new_qty|
             let numerator = self.avg_entry_price
                 .saturating_mul(prev_qty.abs())
-                .saturating_add(price.0.saturating_mul(qty.0));
+                .saturating_add(price.0.saturating_mul(qty.0 as i64));
             self.avg_entry_price = numerator / new_qty.abs();
             self.net_qty = new_qty;
             return;

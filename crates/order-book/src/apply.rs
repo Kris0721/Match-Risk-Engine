@@ -18,9 +18,9 @@
 use smallvec::SmallVec;
 
 use core_types::{
-    commands::{InboundCommand, OrderType, SequencedCommand},
+    commands::{InboundCommand, OrderType, SequencedCommand, TimeInForce},
     events::{EngineEvent, RejectReason},
-    AccountId, OrderId, Price, Qty, Side, Symbol,
+    AccountId, ClientOrderId, OrderId, Price, Qty, Side, Symbol,
 };
 
 use crate::{
@@ -57,12 +57,14 @@ impl OrderBook {
         match cmd.cmd {
             InboundCommand::NewOrder {
                 account,
+                client_order_id,
                 symbol,
                 side,
                 price,
                 qty,
                 order_type,
-            } => self.apply_new_order(cmd.seq, cmd.ts_ns, account, symbol, side, price, qty, order_type),
+                time_in_force,
+            } => self.apply_new_order(cmd.seq, cmd.ts_ns, account, client_order_id, symbol, side, price, qty, order_type, time_in_force),
 
             InboundCommand::Cancel { account, order_id } => {
                 self.apply_cancel(cmd.seq, account, order_id)
@@ -84,11 +86,13 @@ impl OrderBook {
         seq: u64,
         ts_ns: u64,
         account: AccountId,
+        client_order_id: ClientOrderId,
         symbol: Symbol,
         side: Side,
         price: Price,
         qty: Qty,
         order_type: OrderType,
+        time_in_force: TimeInForce,
     ) -> EventVec {
         let mut events: EventVec = SmallVec::new();
 
@@ -98,9 +102,11 @@ impl OrderBook {
             events.push(EngineEvent::Rejected {
                 seq,
                 order_id,
-                reason: RejectReason::InvalidQty,
-            });
-            return events;
+            account_id: account,
+            client_order_id,
+            reason: RejectReason::InvalidQty,
+        });
+        return events;
         }
 
         let Some(price_idx) = self.price_to_idx(price) else {
@@ -108,6 +114,8 @@ impl OrderBook {
             events.push(EngineEvent::Rejected {
                 seq,
                 order_id,
+                account_id: account,
+                client_order_id,
                 reason: RejectReason::PriceOutOfRange,
             });
             return events;
@@ -131,7 +139,7 @@ impl OrderBook {
         }
 
         // ── IOC: cancel the unfilled remainder immediately ─────────────────
-        if order_type == OrderType::ImmediateOrCancel {
+        if time_in_force == TimeInForce::Ioc {
             if qty_remaining < qty {
                 // Partially filled — already emitted Trade events above.
             } else {
@@ -139,11 +147,13 @@ impl OrderBook {
                 events.push(EngineEvent::Rejected {
                     seq,
                     order_id,
+                    account_id: account,
+                    client_order_id,
                     reason: RejectReason::IocNoMatch,
                 });
             }
             if qty_remaining.0 < qty.0 {
-                events.push(EngineEvent::Cancelled { seq, order_id });
+                events.push(EngineEvent::OrderCancelled { order_id, account_id: account, seq, symbol });
             }
             events.push(self.book_top_event(seq, symbol));
             return events;
@@ -155,6 +165,8 @@ impl OrderBook {
             events.push(EngineEvent::Rejected {
                 seq,
                 order_id,
+                account_id: account,
+                client_order_id,
                 reason: RejectReason::ArenaFull,
             });
             return events;
@@ -165,7 +177,12 @@ impl OrderBook {
         self.id_to_key.insert(order_id, key);
 
         // Link into the price level FIFO.
-        self.level_mut(side, price_idx).push_back(key, &mut self.arena);
+        let level_slot = match side {
+            Side::Buy  => &mut self.bids[price_idx],
+            Side::Sell => &mut self.asks[price_idx],
+        };
+        let pl = level_slot.get_or_insert_with(|| crate::level::PriceLevel::new(price));
+        pl.push_back(key, &mut self.arena);
 
         // Update best-bid / best-ask.
         match side {
@@ -173,7 +190,7 @@ impl OrderBook {
             Side::Sell => self.refresh_best_ask_down(price_idx),
         }
 
-        events.push(EngineEvent::Accepted { seq, order_id, ts_ns });
+        events.push(EngineEvent::Accepted { seq, order_id, ts_ns, symbol, account_id: account, client_order_id, side, price, qty: qty_remaining });
         events.push(self.book_top_event(seq, symbol));
         events
     }
@@ -253,16 +270,23 @@ impl OrderBook {
 
             qty_remaining = Qty(qty_remaining.0 - fill_qty.0);
 
+            let maker_remaining = Qty(maker_qty.0 - fill_qty.0);
+            let taker_remaining = qty_remaining;
             events.push(EngineEvent::Trade {
                 seq,
+                ts_ns,
                 symbol,
                 price: maker_price,
                 qty: fill_qty,
-                ts_ns,
                 maker_order: maker_order_id,
                 taker_order: aggressor_order_id,
+                maker_order_id: maker_order_id,
+                taker_order_id: aggressor_order_id,
                 maker_acct: maker_account,
                 taker_acct: aggressor_account,
+                maker_side,
+                maker_remaining_qty: maker_remaining,
+                taker_remaining_qty: taker_remaining,
             });
 
             if maker_fully_filled {
@@ -290,6 +314,8 @@ impl OrderBook {
                 events.push(EngineEvent::Rejected {
                     seq,
                     order_id,
+                    account_id: account,
+                    client_order_id: ClientOrderId::new(0),
                     reason: RejectReason::OrderNotFound,
                 });
                 return events;
@@ -304,6 +330,8 @@ impl OrderBook {
                 events.push(EngineEvent::Rejected {
                     seq,
                     order_id,
+                    account_id: account,
+                    client_order_id: ClientOrderId::new(0),
                     reason: RejectReason::WrongAccount,
                 });
                 return events;

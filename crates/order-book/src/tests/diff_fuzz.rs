@@ -9,7 +9,7 @@
 //! or integrate with `cargo fuzz` / `libfuzzer` for coverage-guided fuzzing.
 
 use core_types::{
-    commands::{InboundCommand, OrderType, SequencedCommand},
+    commands::{InboundCommand, OrderType, SequencedCommand, TimeInForce},
     events::EngineEvent,
     AccountId, OrderId, Price, Qty, Side, Symbol,
 };
@@ -163,19 +163,21 @@ fn gen_commands(rng: &mut StdRng, n: usize) -> Vec<SequencedCommand> {
             let side = if rng.gen_bool(0.5) { Side::Buy } else { Side::Sell };
             let price = Price(TICK_FLOOR + rng.gen_range(0..(NUM_TICKS as i64)));
             let qty = Qty(rng.gen_range(1..=20));
-            let order_type = if rng.gen_bool(0.2) {
-                OrderType::ImmediateOrCancel
+            let (order_type, tif) = if rng.gen_bool(0.2) {
+                (OrderType::Limit, TimeInForce::Ioc)
             } else {
-                OrderType::Limit
+                (OrderType::Limit, TimeInForce::Gtc)
             };
             live_orders.push((seq, account));
             InboundCommand::NewOrder {
                 account,
+                client_order_id: core_types::ClientOrderId::new(0),
                 symbol: SYM,
                 side,
                 price,
                 qty,
                 order_type,
+                time_in_force: tif,
             }
         } else {
             // Cancel a random live order

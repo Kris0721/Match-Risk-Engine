@@ -18,7 +18,7 @@ use core_types::{
     AccountId, CancelOrder, ClientOrderId, Command, Event, InstrumentId, NewOrder, OrderId,
     OrderType, Price, Qty, Side, TimeInForce,
 };
-use ring_buffer::spsc::SpscProducer;
+use ring_buffer::SpscProducer;
 
 use crate::codec::{Codec, CodecError, Frame};
 
@@ -61,7 +61,7 @@ pub struct Session {
     /// Producer side of the SPSC ring buffer feeding the sequencer.
     /// Each session gets a dedicated lane; the sequencer multiplexes
     /// across all sessions (see `sequencer/sequencer.rs`).
-    cmd_producer: SpscProducer<Command>,
+    cmd_producer: SpscProducer<Command, 4096>,
 
     /// Instruments this session is currently subscribed to for
     /// market data updates.
@@ -77,7 +77,7 @@ pub struct Session {
 }
 
 impl Session {
-    pub fn new(id: SessionId, account_id: AccountId, cmd_producer: SpscProducer<Command>) -> Self {
+    pub fn new(id: SessionId, account_id: AccountId, cmd_producer: SpscProducer<Command, 4096>) -> Self {
         Session {
             id,
             account_id,
@@ -230,8 +230,9 @@ fn decode_new_order(account_id: AccountId, payload: &[u8]) -> Result<NewOrder, S
         _ => return Err(SessionError::MalformedPayload { msg_type: msg_type::NEW_ORDER, reason: "invalid time_in_force" }),
     };
 
+    let price = Price::new(price_raw);
     let order_type = match order_type_tag {
-        0 => OrderType::Limit { price: Price::new(price_raw) },
+        0 => OrderType::Limit,
         1 => OrderType::Market,
         _ => return Err(SessionError::MalformedPayload { msg_type: msg_type::NEW_ORDER, reason: "invalid order_type" }),
     };
@@ -245,6 +246,7 @@ fn decode_new_order(account_id: AccountId, payload: &[u8]) -> Result<NewOrder, S
         instrument_id,
         client_order_id,
         side,
+        price,
         order_type,
         qty,
         time_in_force: tif,
@@ -377,6 +379,12 @@ fn reject_reason_tag(r: core_types::RejectReason) -> u8 {
         InvalidQuantity => 3,
         UnknownInstrument => 4,
         UnknownOrder => 5,
+        InvalidQty => 6,
+        PriceOutOfRange => 7,
+        IocNoMatch => 8,
+        ArenaFull => 9,
+        OrderNotFound => 10,
+        WrongAccount => 11,
     }
 }
 
@@ -388,7 +396,7 @@ mod tests {
     use ring_buffer::spsc;
 
     fn make_session() -> (Session, ring_buffer::spsc::Consumer<Command>) {
-        let (producer, consumer) = spsc::channel::<Command>(16);
+        let (producer, consumer) = spsc::spsc_queue::<Command, 4096>();
         let session = Session::new(SessionId(1), AccountId::new(42), producer);
         (session, consumer)
     }

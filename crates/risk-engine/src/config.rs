@@ -62,11 +62,12 @@ pub fn tier0_order_check(
     qty: Qty,
     limits: &RiskLimits,
 ) -> Result<(), RejectionReason> {
-    let notional = price.0.saturating_mul(qty.0) / 100_000_000; // normalise scale
+    let qty_i: i64 = qty.0 as i64;
+    let notional = price.0.saturating_mul(qty_i) / 100_000_000; // normalise scale
     if notional > limits.max_order_notional {
         return Err(RejectionReason::NotionalTooLarge);
     }
-    if qty.0 <= 0 {
+    if qty.0 == 0 {
         return Err(RejectionReason::InvalidQty);
     }
     if price.0 <= 0 {

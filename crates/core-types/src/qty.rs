@@ -1,4 +1,4 @@
-// Quantity definitions and operations
+﻿// Quantity definitions and operations
 use std::fmt;
 use std::ops::{Add, Sub, AddAssign, SubAssign};
 
@@ -38,13 +38,13 @@ impl Qty {
         self.0 == 0
     }
 
-    /// Saturating subtraction — clamps to zero instead of underflowing.
+    /// Saturating subtraction â€” clamps to zero instead of underflowing.
     #[inline(always)]
     pub fn saturating_sub(self, rhs: Qty) -> Qty {
         Qty(self.0.saturating_sub(rhs.0))
     }
 
-    /// Checked subtraction — returns `None` if it would underflow.
+    /// Checked subtraction â€” returns `None` if it would underflow.
     #[inline(always)]
     pub fn checked_sub(self, rhs: Qty) -> Option<Qty> {
         self.0.checked_sub(rhs.0).map(Qty)
@@ -55,7 +55,7 @@ impl Qty {
         self.0.checked_add(rhs.0).map(Qty)
     }
 
-    /// Returns the smaller of `self` and `rhs` — used heavily when
+    /// Returns the smaller of `self` and `rhs` â€” used heavily when
     /// computing fill quantities during matching.
     #[inline(always)]
     pub fn min(self, rhs: Qty) -> Qty {
@@ -76,7 +76,7 @@ impl Sub for Qty {
     #[inline(always)]
     fn sub(self, rhs: Qty) -> Qty {
         // Debug builds: panic on underflow (catches bugs).
-        // Release builds: wraps — callers on the hot path should
+        // Release builds: wraps â€” callers on the hot path should
         // prefer `checked_sub`/`saturating_sub` for safety.
         Qty(self.0 - rhs.0)
     }
@@ -137,3 +137,4 @@ mod tests {
         assert_eq!(q, Qty::new(12));
     }
 }
+

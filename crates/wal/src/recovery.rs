@@ -198,15 +198,7 @@ fn scan_wal(data: &[u8], after_seq: u64) -> ScanResult {
 
 /// Deserialise an `InboundCommand` from rkyv bytes.
 fn deserialise_command(bytes: &[u8]) -> Result<InboundCommand, RecoveryError> {
-    // SAFETY: we verified the CRC32 before calling this function, so the
-    // bytes are known to be uncorrupted. rkyv's `check_archived_root` performs
-    // additional structural validation.
-    let archived = rkyv::check_archived_root::<InboundCommand>(bytes)
-        .map_err(|e| RecoveryError::Deserialise(format!("{e:?}")))?;
-    let cmd: InboundCommand = archived
-        .deserialize(&mut rkyv::Infallible)
-        .map_err(|e| RecoveryError::Deserialise(format!("{e:?}")))?;
-    Ok(cmd)
+    bincode::deserialize(bytes).map_err(|e| RecoveryError::Deserialise(e.to_string()))
 }
 
 #[inline]
@@ -230,11 +222,13 @@ mod tests {
             ts_ns: seq * 1000,
             cmd: InboundCommand::NewOrder {
                 account:    AccountId(1),
+                client_order_id: core_types::ClientOrderId::new(0),
                 symbol:     Symbol(0),
                 side:       Side::Buy,
                 price:      Price(100_00000000),
                 qty:        Qty(1_00000000),
                 order_type: OrderType::Limit,
+                time_in_force: core_types::TimeInForce::Gtc,
             },
         }
     }

@@ -3,7 +3,7 @@
 //! full fills, cancels, IOC, and best-bid/ask tracking.
 
 use core_types::{
-    commands::{InboundCommand, OrderType, SequencedCommand},
+    commands::{InboundCommand, OrderType, SequencedCommand, TimeInForce},
     events::{EngineEvent, RejectReason},
     AccountId, OrderId, Price, Qty, Side, Symbol,
 };
@@ -45,12 +45,15 @@ fn new_limit(
         seq,
         InboundCommand::NewOrder {
             account,
+            client_order_id: core_types::ClientOrderId::new(0),
             symbol: SYM,
             side,
             price: Price(price),
             qty: Qty(qty),
             order_type: OrderType::Limit,
+            time_in_force: TimeInForce::Gtc,
         },
+
     )
 }
 
@@ -65,12 +68,15 @@ fn new_ioc(
         seq,
         InboundCommand::NewOrder {
             account,
+            client_order_id: core_types::ClientOrderId::new(0),
             symbol: SYM,
             side,
             price: Price(price),
             qty: Qty(qty),
-            order_type: OrderType::ImmediateOrCancel,
+            order_type: OrderType::Limit,
+            time_in_force: TimeInForce::Ioc,
         },
+
     )
 }
 

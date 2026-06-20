@@ -1,4 +1,4 @@
-use std::fmt;
+﻿use std::fmt;
 
 /// Order side: `Buy` (bid) or `Sell` (ask).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -10,7 +10,7 @@ pub enum Side {
 }
 
 impl Side {
-    /// Returns the opposite side — used heavily during matching to
+    /// Returns the opposite side â€” used heavily during matching to
     /// find the resting book to cross against.
     #[inline(always)]
     pub const fn opposite(self) -> Side {
@@ -67,3 +67,4 @@ mod tests {
         assert_eq!(Side::Sell.sign(), -1);
     }
 }
+

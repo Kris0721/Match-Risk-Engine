@@ -16,5 +16,5 @@ pub use price::Price;
 pub use qty::Qty;
 pub use ids::{OrderId, AccountId, InstrumentId, SequenceNo, ClientOrderId, Symbol};
 pub use side::Side;
-pub use commands::{Command, InboundCommand, SequencedCommand};
-pub use events::{Event, EngineEvent};
+pub use commands::{Command, InboundCommand, SequencedCommand, NewOrder, CancelOrder, OrderType, TimeInForce};
+pub use events::{Event, EngineEvent, RejectReason, CancelReason};

@@ -67,17 +67,16 @@ pub fn check_new_order(
         return Err(RiskRejectReason::MaxOrderQtyExceeded);
     }
 
-    if let Some(px) = order.price {
-        let notional = notional_of(px, order.qty);
-        if notional > limits.max_order_notional {
-            return Err(RiskRejectReason::MaxOrderNotionalExceeded);
-        }
+    let px = order.price;
+    let notional = notional_of(px, order.qty);
+    if notional > limits.max_order_notional {
+        return Err(RiskRejectReason::MaxOrderNotionalExceeded);
+    }
 
-        if limits.price_band_bps > 0 {
-            if let Some(reference) = reference_price {
-                if price_out_of_band(px, reference, limits.price_band_bps) {
-                    return Err(RiskRejectReason::PriceOutOfBand);
-                }
+    if limits.price_band_bps > 0 {
+        if let Some(reference) = reference_price {
+            if price_out_of_band(px, reference, limits.price_band_bps) {
+                return Err(RiskRejectReason::PriceOutOfBand);
             }
         }
     }
@@ -96,9 +95,22 @@ pub fn check_new_order(
 
 #[inline]
 fn notional_of(price: Price, qty: Qty) -> u64 {
-    // Both Price and Qty are fixed-point integers internally; raw()
-    // exposes the underlying integer representation.
-    price.raw().saturating_mul(qty.raw())
+    // Compute notional as price * qty with safe widening to avoid
+    // sign/size issues between i64 and u64.
+    let p = price.raw() as i128;
+    let q = qty.raw() as i128;
+    if p <= 0 {
+        return 0;
+    }
+    let prod = p.saturating_mul(q);
+    if prod <= 0 {
+        return 0;
+    }
+    if prod > i128::from(u64::MAX) {
+        u64::MAX
+    } else {
+        prod as u64
+    }
 }
 
 #[inline]

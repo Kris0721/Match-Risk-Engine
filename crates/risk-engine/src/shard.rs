@@ -34,7 +34,7 @@ pub type MarkPrices = HashMap<Symbol, Price>;
 /// The complete state owned by one risk shard.
 pub struct RiskShard {
     /// The half-open range of `AccountId`s this shard owns.
-    pub owned: Range<u32>,
+    pub owned: Range<u64>,
     /// Per-(account, symbol) position. Single-writer: only this shard writes.
     pub positions: HashMap<(AccountId, Symbol), Position>,
     /// Seqlock states for each account this shard owns.
@@ -45,7 +45,7 @@ pub struct RiskShard {
 }
 
 impl RiskShard {
-    pub fn new(owned: Range<u32>, config: ShardConfig) -> Self {
+    pub fn new(owned: Range<u64>, config: ShardConfig) -> Self {
         let n = (owned.end - owned.start) as usize;
         let states = (0..n).map(|_| AccountRiskState::default()).collect();
         Self {
@@ -110,7 +110,8 @@ impl RiskShard {
 
                     // Publish updated state via seqlock.
                     let idx = self.state_idx(acct);
-                    self.states[idx].update(balance, used_margin, false);
+                    let s = self.states[idx].read();
+                    self.states[idx].update(balance, used_margin, s.frozen, s.halted, s.position, s.open_order_count);
 
                     // Trigger liquidation if maintenance margin breached.
                     if used_margin > balance {
@@ -119,17 +120,18 @@ impl RiskShard {
                             symbol,
                         });
                         // Freeze the account immediately so no new orders slip through.
-                        self.states[idx].update(balance, used_margin, true);
+                        let s2 = self.states[idx].read();
+                        self.states[idx].update(balance, used_margin, true, s2.halted, s2.position, s2.open_order_count);
                     }
                 }
 
                 liquidate_cmd
             }
-
-            EngineEvent::OrderCancelled { account, .. }
-            | EngineEvent::OrderRejected { account, .. } => {
+            
+            EngineEvent::OrderCancelled { account_id, .. }
+            | EngineEvent::OrderRejected { account_id, .. } => {
                 // No position change; nothing to do for the risk shard.
-                let _ = account;
+                let _ = account_id;
                 None
             }
 
@@ -140,6 +142,7 @@ impl RiskShard {
                 eprintln!("[risk-shard {:?}] snapshot at seq={}", self.owned, seq);
                 None
             }
+            _ => None
         }
     }
 

@@ -1,4 +1,4 @@
-// Identifier types (e.g., Order ID, User ID, Asset ID)
+﻿// Identifier types (e.g., Order ID, User ID, Asset ID)
 use std::fmt;
 use std::num::NonZeroU64;
 
@@ -9,7 +9,7 @@ macro_rules! id_type {
         $(#[$meta])*
         #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
         #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-        #[repr(transparent)]
+                #[repr(transparent)]
         pub struct $name(pub u64);
 
         impl $name {
@@ -58,6 +58,7 @@ id_type!(
 );
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Symbol(pub u16);
 
 id_type!(
@@ -98,7 +99,7 @@ impl SequenceNo {
     }
 
     /// Returns the next sequence number. Panics on overflow (would
-    /// require ~584 years at 1 billion seq/sec — treated as
+    /// require ~584 years at 1 billion seq/sec â€” treated as
     /// unreachable in practice).
     #[inline(always)]
     pub fn next(self) -> SequenceNo {
@@ -131,3 +132,5 @@ mod tests {
         assert_eq!(first.next().get(), 2);
     }
 }
+
+

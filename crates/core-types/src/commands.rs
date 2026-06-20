@@ -1,30 +1,30 @@
-// Input commands for the matching risk engine
+﻿// Input commands for the matching risk engine
 use crate::{AccountId, ClientOrderId, InstrumentId, OrderId, Price, Qty, Side, Symbol};
 
 /// Time-in-force qualifier for new orders.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum TimeInForce {
-    /// Good-till-cancel — rests on the book until filled or canceled.
+    /// Good-till-cancel â€” rests on the book until filled or canceled.
     Gtc,
-    /// Immediate-or-cancel — fills what it can immediately, cancels remainder.
+    /// Immediate-or-cancel â€” fills what it can immediately, cancels remainder.
     Ioc,
-    /// Fill-or-kill — fills completely immediately or not at all.
+    /// Fill-or-kill â€” fills completely immediately or not at all.
     Fok,
 }
 
-/// The order type. `Limit` carries an explicit price; `Market` crosses
-/// the book at whatever price is available (subject to TIF).
+/// The order type. Limit/Market are orthogonal to the explicit `price` field
+/// carried on `NewOrder` (keeps the wire-protocol smaller and cache-friendly).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum OrderType {
-    Limit { price: Price },
+    Limit,
     Market,
 }
 
 /// A new order request, as it enters the sequencer from the gateway.
 ///
-/// `order_id` is `None` at this point — it is assigned by the
+/// `order_id` is `None` at this point â€” it is assigned by the
 /// sequencer when the command is admitted and stamped with a
 /// `SequenceNo`. See `sequencer/sequencer.rs`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -34,6 +34,7 @@ pub struct NewOrder {
     pub instrument_id: InstrumentId,
     pub client_order_id: ClientOrderId,
     pub side: Side,
+    pub price: Price,
     pub order_type: OrderType,
     pub qty: Qty,
     pub time_in_force: TimeInForce,
@@ -50,7 +51,7 @@ pub struct CancelOrder {
 
 /// Request to reduce or replace the quantity of a resting order
 /// without changing its price/time priority position is NOT
-/// guaranteed — engines typically treat this as cancel-replace.
+/// guaranteed â€” engines typically treat this as cancel-replace.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ModifyOrder {
@@ -61,7 +62,7 @@ pub struct ModifyOrder {
     pub new_price: Option<Price>,
 }
 
-/// Top-level command enum — the unit of work that flows through the
+/// Top-level command enum â€” the unit of work that flows through the
 /// `ring-buffer` SPSC queue from gateway -> sequencer -> matching engine.
 ///
 /// This enum is intentionally flat and `Copy` to avoid allocation on
@@ -116,12 +117,14 @@ impl Command {
 pub enum InboundCommand {
     NewOrder {
         account: AccountId,
+        client_order_id: ClientOrderId,
         symbol: Symbol,
         side: Side,
         price: Price,
         qty: Qty,
         order_type: OrderType,
-    },
+        time_in_force: TimeInForce,
+    }, 
     Cancel {
         account: AccountId,
         order_id: OrderId,
@@ -156,7 +159,8 @@ mod tests {
             instrument_id: InstrumentId::new(7),
             client_order_id: ClientOrderId::new(100),
             side: Side::Buy,
-            order_type: OrderType::Limit { price: Price::new(10_050) },
+            price: Price::new(10_050),
+            order_type: OrderType::Limit,
             qty: Qty::new(10),
             time_in_force: TimeInForce::Gtc,
         }
@@ -180,3 +184,5 @@ mod tests {
         assert_eq!(cmd, cmd2);
     }
 }
+
+

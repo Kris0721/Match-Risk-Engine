@@ -81,13 +81,14 @@ impl OrderBook {
             arena.remove(k);
         }
 
-        let ladder: Vec<Option<PriceLevel>> = (0..cfg.num_ticks).map(|_| None).collect();
+        let bids: Vec<Option<PriceLevel>> = (0..cfg.num_ticks).map(|_| None).collect();
+        let asks: Vec<Option<PriceLevel>> = (0..cfg.num_ticks).map(|_| None).collect();
 
         Self {
             symbol: cfg.symbol,
             arena,
-            bids: ladder.clone(),
-            asks: ladder,
+            bids,
+            asks,
             best_bid_idx: None,
             best_ask_idx: None,
             tick_floor: cfg.tick_floor,
