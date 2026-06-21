@@ -60,7 +60,6 @@ impl AccountRiskState {
         let seq = self.seq.load(Ordering::Relaxed);
         debug_assert!(seq % 2 == 0, "seqlock: concurrent update");
         self.seq.store(seq.wrapping_add(1), Ordering::Relaxed);
-        fence(Ordering::Release);
         unsafe {
             *self.balance.get()          = balance;
             *self.used_margin.get()      = used_margin;
@@ -69,6 +68,7 @@ impl AccountRiskState {
             *self.position.get()         = position;
             *self.open_order_count.get() = open_order_count;
         }
+        fence(Ordering::Release);
         self.seq.store(seq.wrapping_add(2), Ordering::Release);
     }
 
@@ -83,6 +83,7 @@ impl AccountRiskState {
             let halted           = unsafe { *self.halted.get() };
             let position         = unsafe { *self.position.get() };
             let open_order_count = unsafe { *self.open_order_count.get() };
+            fence(Ordering::Acquire);
             let seq2 = self.seq.load(Ordering::Acquire);
             if seq1 == seq2 {
                 return AccountRiskSnapshot {
