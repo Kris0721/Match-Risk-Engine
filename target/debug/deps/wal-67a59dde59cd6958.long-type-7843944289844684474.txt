@@ -1,0 +1,2 @@
+CompositeSerializer<AlignedSerializer<AlignedVec>, FallbackScratch<HeapScratch<256>, AllocScratch>, SharedSerializeMap>
+InboundCommand: Serialize<CompositeSerializer<AlignedSerializer<AlignedVec>, FallbackScratch<HeapScratch<256>, AllocScratch>, SharedSerializeMap>>

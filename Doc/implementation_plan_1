@@ -1,0 +1,173 @@
+# MRE Project Analysis — Missing Code & Broken Joins Fix
+
+## Problem Summary
+
+After a full audit of all 12 crates in the workspace, I identified **major structural disconnects** between what crates expose/expect and what their dependents actually import. The code was generated with two separate "dialects" of the API that don't match — the **architecture doc dialect** (used by `sequencer`, `risk-engine`, `sim`) and a **different dialect** (used by `matching-engine`, `gateway`, `order-book/apply.rs`). These need to be reconciled into a single coherent API surface.
+
+---
+
+## Issues Found — Categorised
+
+### 🔴 Category A: Fatal Typo / Syntax Errors
+
+| # | File | Line | Issue |
+|---|------|------|-------|
+| A1 | [lib.rs](file:///c:/Users/KRISHNA%20KHASGE/OneDrive/Documents/Codes/MRE/crates/ring-buffer/src/lib.rs#L1) | 1 | `ppub mod cache_pad;` — typo, should be `pub` |
+
+---
+
+### 🔴 Category B: Type / API Mismatches Across Crate Boundaries
+
+These are the "broken joins" — where one crate imports types or calls methods that don't exist on the depended crate.
+
+| # | Consumer Crate | What it imports / uses | Actual API in Provider | Fix |
+|---|----------------|----------------------|----------------------|-----|
+| B1 | `order-book/apply.rs` | `core_types::commands::{InboundCommand, OrderType, SequencedCommand}`, `core_types::events::{EngineEvent, RejectReason}`, `core_types::Symbol` | `core_types` has `Command`, `NewOrder`, `CancelOrder`, `Event`, `InstrumentId` — no `InboundCommand`, `SequencedCommand`, `EngineEvent`, `Symbol` | Add compat re-exports or rewrite apply.rs to use the actual types |
+| B2 | `order-book/apply.rs` | `RejectReason::PriceOutOfRange`, `IocNoMatch`, `ArenaFull`, `OrderNotFound`, `WrongAccount` | `core_types::RejectReason` has: `RiskLimitBreach`, `InstrumentHalted`, `InvalidPrice`, `InvalidQuantity`, `UnknownInstrument`, `UnknownOrder` | Add missing variants to `RejectReason` |
+| B3 | `order-book/apply.rs` | `OrderType::ImmediateOrCancel` comparison, `OrderType::Limit` as unit variant | `core_types::OrderType` is `Limit { price }` / `Market` + separate `TimeInForce` enum | Rewrite matching to use `TimeInForce::Ioc` |
+| B4 | `order-book/book.rs` | `core_types::Symbol` | Not exported; `core_types` uses `InstrumentId` | Add `Symbol` as alias or convert |
+| B5 | `matching-engine/engine.rs` | `ring_buffer::spsc::{Consumer, Producer}` | Actual: `SpscConsumer`, `SpscProducer` | Fix imports |
+| B6 | `matching-engine/engine.rs` | `seqlock::account_risk_state::AccountRiskStateWriter` | Not provided — `seqlock` exposes `AccountRiskState` / `AccountRiskSnapshot` | Create `AccountRiskStateWriter` or refactor |
+| B7 | `matching-engine/engine.rs` | `wal::log::WalWriter` (as trait), `NullWal` | `wal::WalWriter` is a concrete struct, not a trait. No `NullWal`. | Add `WalWriter` trait + `NullWal` |
+| B8 | `matching-engine/engine.rs` | `Event::ExecutionReport`, `Event::OrderRejected` | No such variants in `core_types::Event` | Use actual `Event` variants |
+| B9 | `matching-engine/engine.rs` | `OrderBook::cancel()`, `OrderBook::replace()`, `OrderBook::apply_new_order()` | `OrderBook` only has `apply(SequencedCommand)` | Add methods or refactor |
+| B10 | `matching-engine/risk_check.rs` | `AccountRiskState::is_halted()`, `::open_order_count()`, `::position()` | `AccountRiskState` only has `read()`, `update()`, `is_frozen()` | Add methods or use `read().frozen` |
+| B11 | `matching-engine/risk_check.rs` | `Qty::from_raw()`, `Price::from_raw()`, `price.raw()`, `qty.raw()` | Actual API: `Qty::new(u64)`, `Price::new(i64)`, `.0` field access | Add `from_raw`/`raw()` aliases |
+| B12 | `sequencer/sequencer.rs` | `core_types::{EngineEvent, InboundCommand, OrderType, SequencedCommand, Symbol}` | These types exist in the architecture but not in `core_types` (which uses `Command`, `Event`, `InstrumentId`) | Add these types to `core_types` |
+| B13 | `risk-engine/shard.rs` | `core_types::{EngineEvent, InboundCommand, Symbol}`, `EngineEvent::Trade { maker_side, .. }`, `EngineEvent::OrderCancelled`, `EngineEvent::OrderRejected`, `EngineEvent::SnapshotMarker` | Not in `core_types::Event` | Add these types/variants |
+| B14 | `risk-engine/shard.rs` | `Side::opposite()` method | Exists in `core_types::Side` ✅ | OK |
+| B15 | `sim/harness.rs` | `order_book::Book`, `core_types::{EngineEvent, InboundCommand, SequencedCommand, Symbol}` | `order_book` exports `OrderBook`, not `Book` | Fix import |
+| B16 | `sim/harness.rs` | `risk_engine::{RiskShard, ShardConfig, MarkPrices}` | `RiskShard`/`ShardConfig` in `risk_engine::shard`/`config` — not re-exported from `lib.rs` | Add re-exports |
+| B17 | `gateway/server.rs` | `ring_buffer::spsc::{self, Producer}`, `spsc::channel` | Actual: `ring_buffer::spsc_queue`, `SpscProducer` | Fix |
+| B18 | `gateway/server.rs` | `logger::info`, `logger::warn` | `logger` exports `Logger` struct with methods — no free functions | Add free functions or refactor |
+| B19 | `gateway/server.rs` | `MarketDataHub::new()` returns `Arc<Self>` but `handle_connection` takes `Arc<MarketDataHub>` | Consistent ✅ | OK |
+| B20 | `gateway/session.rs` | `core_types::{CancelOrder, Command, Event, NewOrder, OrderType, TimeInForce}` imported directly | These need to match `core_types::commands::*` exactly | Verify re-exports |
+| B21 | `gateway/session.rs` | `ring_buffer::spsc::Producer` | Should be `SpscProducer` | Fix |
+| B22 | `metrics/aggregator.rs` | `matching_engine::metrics::{EngineMetrics, EngineMetricsSnapshot}` | These exist in `matching-engine` ✅ | OK |
+| B23 | `order-book/apply.rs` | Duplicate `PartialOrd`/`Ord` impls for `Qty` | `Qty` already derives them in `core_types::qty` | Remove duplicate |
+| B24 | `order-book/apply.rs` | Duplicate `Side::opposite()` trait | Already on `Side` in `core_types` | Remove duplicate |
+| B25 | `metrics/Cargo.toml` | depends on `gateway` | Circular or unnecessary | Remove unless needed |
+| B26 | `matching-engine/Cargo.toml` | depends on `logger`, `metrics` | `metrics` depends on `matching-engine` → circular dependency! | Remove `metrics` dep from `matching-engine` |
+
+---
+
+### 🟡 Category C: Missing Types That Need to Be Created
+
+The architecture doc and `sequencer`/`risk-engine`/`sim` crates reference types that don't exist yet in `core_types`:
+
+| Type | Used By | Should Be Added To |
+|------|---------|-------------------|
+| `Symbol` (alias or newtype for `u16`) | sequencer, risk-engine, sim, order-book | `core_types` (add `pub type Symbol = InstrumentId` or new type) |
+| `InboundCommand` enum | sequencer, risk-engine, sim | `core_types::commands` |
+| `SequencedCommand` struct | sequencer, sim, WAL | `core_types::commands` |
+| `EngineEvent` enum | sequencer, risk-engine, sim | `core_types::events` |
+| `OrderType::Limit` (unit variant) | sequencer tests | Already exists as `Limit { price }` — tests need fixing |
+
+---
+
+### 🟡 Category D: Missing Scenario / Test Files
+
+The `sim` crate `lib.rs` references these files that need to exist:
+
+| File | Status |
+|------|--------|
+| `scenarios/basic_fills.rs` | Exists (2284 bytes) |
+| `scenarios/liquidation.rs` | Exists (2329 bytes) |
+| `scenarios/snapshot_recovery.rs` | Exists (3676 bytes) |
+| `tests/matching_unit.rs` (order-book) | Exists |
+| `tests/diff_fuzz.rs` (order-book) | Exists |
+
+---
+
+## Proposed Fix Strategy
+
+> [!IMPORTANT]
+> The project has **two parallel API surfaces** that need reconciling. The safest approach is to **extend `core_types`** to include both the gateway-facing types (`Command`, `Event`) AND the engine-internal types (`InboundCommand`, `SequencedCommand`, `EngineEvent`, `Symbol`), then fix each crate's imports.
+
+### Phase 1: Fix `core_types` (foundation)
+1. Add `Symbol` type (re-export or alias of `InstrumentId`, or new `u16` wrapper)
+2. Add `InboundCommand` enum (architecture-doc style)
+3. Add `SequencedCommand` struct
+4. Add `EngineEvent` enum
+5. Add missing `RejectReason` variants (`PriceOutOfRange`, `ArenaFull`, `IocNoMatch`, `OrderNotFound`, `WrongAccount`)
+6. Add convenience methods: `Price::from_raw()` / `.raw()`, `Qty::from_raw()` / `.raw()`
+7. Re-export all types from `lib.rs`
+
+### Phase 2: Fix `ring-buffer`
+1. Fix typo `ppub` → `pub`
+2. Add `channel()` factory function alias, and `Producer`/`Consumer` type aliases
+
+### Phase 3: Fix `seqlock`
+1. Add `AccountRiskStateWriter` wrapper (or add needed methods to `AccountRiskState`)
+
+### Phase 4: Fix `order-book`
+1. Rewrite `apply.rs` to use proper types from `core_types`
+2. Remove duplicate `Ord`/`PartialOrd` for `Qty`
+3. Remove duplicate `Side::opposite()` trait
+4. Add `Book` type alias for `OrderBook`
+
+### Phase 5: Fix `matching-engine`
+1. Fix imports (use `SpscProducer`/`SpscConsumer`, actual event types)
+2. Add `WalWriter` trait + `NullWal` to `wal` crate
+3. Fix `engine.rs` to use proper `OrderBook` API
+4. Fix `risk_check.rs` to use actual `AccountRiskState` methods
+5. Fix `Cargo.toml` — remove circular `metrics` dep
+
+### Phase 6: Fix `sequencer`
+1. Fix imports to use actual `core_types` types (after Phase 1)
+
+### Phase 7: Fix `risk-engine`
+1. Fix imports, add re-exports to `lib.rs`
+
+### Phase 8: Fix `wal`
+1. Add `WalWriter` trait if needed by matching-engine
+2. Add `NullWal` implementation
+
+### Phase 9: Fix `gateway`
+1. Fix `ring_buffer::spsc` imports
+2. Add `logger` free-function wrappers or fix call sites
+
+### Phase 10: Fix `sim`
+1. Fix `order_book::Book` → `OrderBook`
+2. Fix re-exports
+
+### Phase 11: Fix `metrics`
+1. Remove circular dependency on `gateway`
+
+### Phase 12: Fix `logger`
+1. Add convenience free functions `info()`, `warn()`, `error()`
+
+---
+
+## Verification Plan
+
+### Automated Tests
+```bash
+cargo check --workspace 2>&1
+cargo test --workspace 2>&1
+```
+
+### Manual Verification
+- Verify `cargo check` produces zero errors
+- Verify existing tests pass
+- Verify the architecture doc's API examples match the actual code
+
+---
+
+> [!WARNING]
+> This is a large, interconnected refactor touching every crate in the workspace. The changes must be applied in dependency order (core-types first, then ring-buffer/seqlock, then order-book, then matching-engine, etc.) to avoid intermediate broken states.
+
+> [!IMPORTANT]
+> **Open question**: The project has TWO different type hierarchies — the "architecture doc" style (`InboundCommand`, `SequencedCommand`, `EngineEvent`, `Symbol`) and the "gateway/session" style (`Command`, `Event`, `InstrumentId`). Should we:
+> 1. **(Recommended)** Keep BOTH — `Command`/`Event` for the gateway wire protocol layer, `InboundCommand`/`SequencedCommand`/`EngineEvent` for the engine-internal path, with conversions between them
+> 2. Merge them into a single unified type hierarchy (simpler but loses the separation)
+>
+> I recommend option 1 since the gateway needs its own clean wire-protocol types distinct from the engine-internal sequenced types.
+
+## Progress update (2026-06-19)
+- Category A: A1 fixed and marked done (ring-buffer lib.rs typo).
+- Category C: All Category C items implemented and recorded as done in session todos.
+- Category B: 26 todos created; B1 (order-book apply) set in_progress. Changes applied across crates: core-types (NewOrder.price, OrderType/TIF split), order-book (apply borrows and TIF handling), risk-engine numeric and seqlock fixes, gateway ring-buffer/producer fixes, and WAL serialization switched from rkyv to bincode/serde for compatibility.
+- WAL: removed rkyv-dependent derives from core-types and migrated wal to serde/bincode for stable workspace builds.
+- Repo state: many compile errors addressed; remaining blockers include WAL recovery adjustments, matching-engine API mismatches, and a few enum/variant mapping updates.
+- Next steps: finish WAL recovery path, reconcile matching-engine imports/APIs, run iterative `cargo check` until workspace is clean. Session todos updated to reflect progress (22 pending, 1 in_progress, 9 done).
