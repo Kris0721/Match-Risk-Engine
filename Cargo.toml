@@ -13,6 +13,7 @@ members = [
     "crates/sim",
     "crates/metrics",
     "crates/logger",
+    "crates/dual-log",
 ]
 
 [workspace.package]

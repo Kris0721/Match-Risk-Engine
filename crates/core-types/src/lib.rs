@@ -11,6 +11,8 @@ pub mod ids;
 pub mod side;
 pub mod commands;
 pub mod events;
+pub mod order_status;
+pub mod log_entry;
 
 pub use price::Price;
 pub use qty::Qty;
@@ -18,3 +20,5 @@ pub use ids::{OrderId, AccountId, InstrumentId, SequenceNo, ClientOrderId, Symbo
 pub use side::Side;
 pub use commands::{Command, InboundCommand, SequencedCommand, NewOrder, CancelOrder, OrderType, TimeInForce};
 pub use events::{Event, EngineEvent, RejectReason, CancelReason};
+pub use order_status::OrderStatus;
+pub use log_entry::LogEntry;

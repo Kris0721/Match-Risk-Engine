@@ -1,0 +1,9 @@
+[package]
+name = "sorter"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+core-types   = { path = "../core-types" }
+dual-log     = { path = "../dual-log" }
+crossbeam-channel = "0.5"
