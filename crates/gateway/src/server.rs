@@ -12,7 +12,7 @@ use core_types::{AccountId, Command, Event};
 use ring_buffer::{spsc, SpscProducer};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::broadcast;
+
 
 use crate::codec::Codec;
 use crate::market_data::MarketDataHub;
@@ -79,6 +79,8 @@ where
         loop {
             let (stream, peer_addr) = listener.accept().await?;
             let session_id = SessionId(self.next_session_id.fetch_add(1, Ordering::Relaxed));
+            // Relaxed: session_id is a local identifier only; no happens-before
+            // relationship with the spawned task's data is required.
             let market_data = Arc::clone(&self.market_data);
             let cmd_producer = (self.cmd_producer_factory)(session_id);
             let read_buf_capacity = self.config.read_buf_capacity;
@@ -128,6 +130,10 @@ async fn handle_connection(
     let account_id = read_auth_frame(&mut read_half, read_buf_capacity).await?;
 
     let mut session = Session::new(session_id, account_id, cmd_producer);
+    // TODO: load ArcSwap<RiskConfig> for this account and pass to Session
+    // so that handle_inbound can call tier0::check(config, cmd) before
+    // pushing to cmd_producer. Orders failing Tier-0 must be rejected here
+    // — before the SPSC push — and never reach the sequencer or WAL.
     let codec = Codec;
 
     // Channel used by the market-data forwarding tasks to push encoded
@@ -182,20 +188,22 @@ async fn handle_connection(
         // track which subscriptions already have an active forwarder
         // task; elided here for brevity — see note above re: full
         // bidirectional design.)
-        for &instrument_id in &session.subscriptions.clone() {
-            let mut rx = market_data.subscribe(instrument_id).await;
-            let tx = md_tx.clone();
-            let codec = codec;
-            tokio::spawn(async move {
-                while let Ok(ev) = rx.recv().await {
-                    let mut buf = BytesMut::new();
-                    if encode_market_data(&codec, &ev, &mut buf).is_ok() {
-                        if tx.send(buf).await.is_err() {
-                            break;
+        for &instrument_id in session.subscriptions.iter() {
+            if forwarded.insert(instrument_id) {
+                let mut rx = market_data.subscribe(instrument_id).await;
+                let tx = md_tx.clone();
+                let codec = codec;
+                tokio::spawn(async move {
+                    while let Ok(ev) = rx.recv().await {
+                        let mut buf = BytesMut::new();
+                        if encode_market_data(&codec, &ev, &mut buf).is_ok() {
+                            if tx.send(buf).await.is_err() {
+                                break;
+                            }
                         }
                     }
-                }
-            });
+                });
+            }
         }
     }
 
@@ -218,8 +226,7 @@ async fn read_auth_frame<R: AsyncReadExt + Unpin>(reader: &mut R, capacity: usiz
             }
             let mut p = &frame.payload[..];
             use bytes::Buf;
-            let raw = p.get_u64_le();
-            return Ok(AccountId::new(raw));
+            let raw = p.get_u64_le();   
         }
 
         let n = reader.read_buf(&mut buf).await?;
@@ -314,16 +321,11 @@ where
 
     for account_id in accounts {
         if let Some(tx) = sessions(account_id) {
-            let mut buf = BytesMut::new();
-            // Reuse the per-session encode logic via a throwaway
-            // Session-like encoder: since `encode_exec_report` is
-            // private to `session`, we re-derive the frame here using
-            // the same wire format by delegating through a temporary
-            // Session is overkill; instead callers in practice hold
-            // the real `Session` and call `session.encode_event`
-            // directly. This free function exists primarily for
-            // documentation of the dispatch flow in `sim`/tests.
-            let _ = (&codec, &mut buf, ev, account_id);
+            // TODO: wire to real session registry.
+            // let mut buf = BytesMut::new();
+            // session.encode_event(ev, &mut buf);
+            // let _ = tx.send(buf).await;
+            todo!("dispatch_event_to_sessions: wire session registry before sim integration");  
         }
     }
 }
