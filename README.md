@@ -251,5 +251,5 @@ for irq in /proc/irq/*/smp_affinity; do echo 1 > $irq; done
 ```
 
 ---
-
+work in Progress
 *Built by [Krishna Khasge](https://github.com/Kris0721) · Mumbai, India*
