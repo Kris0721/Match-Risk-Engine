@@ -20,12 +20,12 @@
 //! dispatch, no hash map.
 
 #[cfg(not(feature = "loom"))]
-use std::sync::atomic::{AtomicU64, Ordering};
+//use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(feature = "loom")]
 use loom::sync::atomic::{AtomicU64, Ordering};
 
 use core_types::{
-    EngineEvent, InboundCommand, OrderType, SequencedCommand, Symbol,
+    EngineEvent, InboundCommand, SequencedCommand, Symbol,
 };
 use ring_buffer::{SpscConsumer, SpscProducer};
 

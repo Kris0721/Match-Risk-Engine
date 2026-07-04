@@ -20,7 +20,7 @@ use core_types::{AccountId, EngineEvent, InboundCommand, Price, Symbol};
 use ring_buffer::{SpmcConsumer, SpscProducer};
 use seqlock::AccountRiskState;
 
-use crate::config::{RiskLimits, ShardConfig};
+use crate::config::ShardConfig;
 use crate::position::Position;
 
 const FANOUT_CAP: usize = 1 << 14; // 16 384 — must match the producer side
@@ -237,7 +237,7 @@ mod tests {
         for state in shard.states.iter_mut() {
             state.update(10_000_00000000, 0, false, false, 0, 0);
         }
-        sha rd
+        shard
     }
 
     fn trade_event(

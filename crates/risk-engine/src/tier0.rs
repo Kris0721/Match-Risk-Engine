@@ -10,7 +10,7 @@
 //! shard thread). Full margin recomputation (Tier-1) happens post-match on the
 //! risk shard.
 
-use core_types::{AccountId, Price, Qty, Symbol};
+use core_types::{Price, Qty};
 use seqlock::AccountRiskState;
 use crate::config::{RejectionReason, RiskLimits, tier0_order_check};
 

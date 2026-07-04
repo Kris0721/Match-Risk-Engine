@@ -122,6 +122,7 @@ impl OrderBook {
     // ── Internal helpers ──────────────────────────────────────────────────
 
     /// Ensure a `PriceLevel` exists at `idx` on `side`; return a mutable ref.
+    #[allow(dead_code)]
     pub(crate) fn level_mut(&mut self, side: Side, idx: usize) -> &mut PriceLevel {
         let price = self.idx_to_price(idx);
         let ladder = match side {

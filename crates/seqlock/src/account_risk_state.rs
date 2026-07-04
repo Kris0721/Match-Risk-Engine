@@ -1,5 +1,5 @@
 #[cfg(not(feature = "loom"))]
-use std::sync::atomic::{AtomicU64, AtomicI64, AtomicBool, AtomicU32, Ordering, fence};
+use std::sync::atomic::{AtomicU64, Ordering, fence};
 #[cfg(feature = "loom")]
 use loom::sync::atomic::{AtomicU64, AtomicI64, AtomicBool, AtomicU32, Ordering, fence};
 

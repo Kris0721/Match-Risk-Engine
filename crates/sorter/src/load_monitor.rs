@@ -5,7 +5,6 @@
 //! - High load → longer timeout (give Primary more time)
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
 
 /// Shared load metrics published by the Primary Engine and read by the Sorter.
 ///
@@ -19,6 +18,7 @@ pub struct LoadMonitor {
     /// Number of idle spins (no work available) in the current window.
     idle_spins: AtomicU64,
     /// Estimated throughput capacity (orders/sec). Set at startup.
+    #[allow(dead_code)]
     capacity_hint: u64,
 }
 

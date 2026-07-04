@@ -91,7 +91,7 @@ impl OrderBook {
         side: Side,
         price: Price,
         qty: Qty,
-        order_type: OrderType,
+        _order_type: OrderType,
         time_in_force: TimeInForce,
     ) -> EventVec {
         let mut events: EventVec = SmallVec::new();

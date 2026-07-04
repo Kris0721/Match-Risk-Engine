@@ -106,7 +106,7 @@ impl SecondEngine {
 
     /// Worker loop — runs until the channel is disconnected.
     fn worker_loop(
-        worker_id: usize,
+        _worker_id: usize,
         work_rx: Receiver<Arc<LogEntry>>,
         pending_ring: Arc<PendingRing>,
         metrics: Arc<SecondEngineMetrics>,

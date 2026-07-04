@@ -40,7 +40,7 @@
 //! - **Single writer**: `FileWalWriter` is `!Sync`. The WAL writer runs on its
 //!   own thread and receives `SequencedCommand`s via an SPSC queue.
 
-use std::fs::{File, OpenOptions};
+use std::fs::OpenOptions;
 use std::path::Path;
 
 use memmap2::MmapMut;
@@ -59,8 +59,6 @@ const FILE_HEADER_SIZE: usize = 32;
 /// Fixed overhead per record: seq(8) + ts_ns(8) + len(4) + crc32(4) = 24 bytes.
 const RECORD_HEADER_SIZE: usize = 24;
 
-/// Maximum serialised size of one `InboundCommand`. Stack-allocated scratch.
-const MAX_PAYLOAD: usize = 512;
 
 /// Default mmap file capacity: 512 MiB.
 const DEFAULT_FILE_CAPACITY: usize = 512 * 1024 * 1024;

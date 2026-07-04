@@ -75,7 +75,7 @@ impl Logger {
             .name("logger-writer".into())
             .spawn(move || {
                 let mut out = BufWriter::with_capacity(1 << 20, writer);
-                let mut dropped: u64 = 0;
+                let dropped: u64 = 0;
 
                 loop {
                     match rx.recv() {
