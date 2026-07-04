@@ -14,6 +14,8 @@ members = [
     "crates/metrics",
     "crates/logger",
     "crates/dual-log",
+    "crates/second-engine",
+    "crates/sorter",
 ]
 
 [workspace.package]
