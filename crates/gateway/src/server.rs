@@ -6,10 +6,11 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::collections::HashSet;
 
 use bytes::BytesMut;
 use core_types::{AccountId, Command, Event};
-use ring_buffer::{spsc, SpscProducer};
+use ring_buffer::SpscProducer;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
@@ -151,6 +152,7 @@ async fn handle_connection(
     });
 
     let mut read_buf = BytesMut::with_capacity(read_buf_capacity);
+    let mut forwarded: HashSet<InstrumentId> = HashSet::new();
 
     loop {
         // Read more bytes from the socket.
@@ -226,7 +228,7 @@ async fn read_auth_frame<R: AsyncReadExt + Unpin>(reader: &mut R, capacity: usiz
             }
             let mut p = &frame.payload[..];
             use bytes::Buf;
-            let raw = p.get_u64_le();   
+            let _raw = p.get_u64_le();   
         }
 
         let n = reader.read_buf(&mut buf).await?;
@@ -309,7 +311,7 @@ pub async fn dispatch_event_to_sessions<L>(ev: &Event, sessions: &L)
 where
     L: Fn(AccountId) -> Option<tokio::sync::mpsc::Sender<BytesMut>>,
 {
-    let codec = Codec;
+    let _codec = Codec;
     let accounts: Vec<AccountId> = match ev {
         Event::Accepted { account_id, .. }
         | Event::Canceled { account_id, .. }
@@ -320,7 +322,7 @@ where
     };
 
     for account_id in accounts {
-        if let Some(tx) = sessions(account_id) {
+        if let Some(_tx) = sessions(account_id) {
             // TODO: wire to real session registry.
             // let mut buf = BytesMut::new();
             // session.encode_event(ev, &mut buf);
