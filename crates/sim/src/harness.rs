@@ -25,8 +25,8 @@
 use std::collections::{HashMap, VecDeque};
 
 use core_types::{
-    AccountId, EngineEvent, InboundCommand, OrderType,
-    Price, Qty, SequencedCommand, Side, Symbol,
+    AccountId, EngineEvent, InboundCommand,
+    Price, SequencedCommand, Symbol,
 };
 use order_book::{OrderBook, book::BookConfig};
 use risk_engine::{RiskShard, ShardConfig, MarkPrices};
@@ -158,13 +158,13 @@ impl SimHarness {
         let accounts_per_shard = config.n_accounts / config.n_risk_shards;
         let shards: Vec<RiskShard> = (0..config.n_risk_shards)
             .map(|i| {
-                let start = (i * accounts_per_shard) as u32;
-                let end   = start + accounts_per_shard as u32;
+                let start = (i * accounts_per_shard) as u64;
+                let end   = start + accounts_per_shard as u64;
                 let shard_config = ShardConfig::new(accounts_per_shard);
                 let mut shard = RiskShard::new(start..end, shard_config);
                 // Seed every account with the initial balance.
                 for state in shard.states.iter_mut() {
-                    state.update(config.initial_balance, 0, false);
+                    state.update(config.initial_balance, 0, false, false, 0, 0);
                 }
                 shard
             })
@@ -174,7 +174,7 @@ impl SimHarness {
         let account_states: Vec<AccountRiskState> = (0..config.n_accounts)
             .map(|_| {
                 let s = AccountRiskState::new();
-                s.update(config.initial_balance, 0, false);
+                s.update(config.initial_balance, 0, false, false, 0, 0);
                 s
             })
             .collect();
@@ -289,7 +289,7 @@ impl SimHarness {
                 let global_idx = shard.owned.start as usize + local_idx;
                 let snap = state.read();
                 self.account_states[global_idx]
-                    .update(snap.balance, snap.used_margin, snap.frozen);
+                    .update(snap.balance, snap.used_margin, snap.frozen, snap.halted, snap.position, snap.open_order_count);
             }
         }
     }

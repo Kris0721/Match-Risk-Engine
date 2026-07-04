@@ -232,10 +232,10 @@ mod tests {
 
     fn make_shard(n_accounts: usize) -> RiskShard {
         let config = ShardConfig::new(n_accounts);
-        let mut shard = RiskShard::new(0..n_accounts as u32, config);
+        let mut shard = RiskShard::new(0..n_accounts as u64, config);
         // Seed each account with 10,000 USD balance (1e8 scale).
         for state in shard.states.iter_mut() {
-            state.update(10_000_00000000, 0, false);
+            state.update(10_000_00000000, 0, false, false, 0, 0);
         }
         shard
     }
@@ -286,7 +286,7 @@ mod tests {
         let config = ShardConfig::new(n);
         let mut shard = RiskShard::new(0..1, config);
         // Give account 0 a tiny balance: 1 USD (1e8 scale).
-        shard.states[0].update(1_00000000, 0, false);
+        shard.states[0].update(1_00000000, 0, false, false, 0, 0);
 
         let marks = HashMap::new();
 

@@ -32,7 +32,7 @@ fn run_full_replay() {
     for i in 0..10u64 {
         // Alternate buy/sell so some trades match and positions build up.
         harness.push_command(InboundCommand::NewOrder {
-            account:    AccountId((i % 2) as u32),
+            account:    AccountId((i % 2) as u64),
             client_order_id: core_types::ClientOrderId::new(0),
             symbol:     Symbol(0),
             side:       if i % 2 == 0 { Side::Buy } else { Side::Sell },
@@ -81,7 +81,7 @@ fn run_truncated_wal_recovery() {
                 side:       if i % 2 == 0 { Side::Buy } else { Side::Sell },
                 price:      Price(50_000_00000000),
                 qty:        Qty(1_00000000),
-                order_type: OrderType::Limit { price: Price(50_000_00000000) },
+                order_type: OrderType::Limit,
                 time_in_force: core_types::TimeInForce::Gtc,
             });
         }

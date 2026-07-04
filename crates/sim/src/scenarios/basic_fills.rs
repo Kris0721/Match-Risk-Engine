@@ -3,7 +3,7 @@
 //! and that both accounts' positions are updated by the risk engine.
 
 use core_types::{AccountId, InboundCommand, OrderType, Price, Qty, Side, Symbol};
-use core_types::OrderType as _OrderType;
+
 use crate::harness::{SimConfig, SimHarness};
 
 pub fn run() {
@@ -24,7 +24,7 @@ pub fn run() {
         side:       Side::Sell,
         price:      Price(50_000_00000000),
         qty:        Qty(1_00000000),
-        order_type: OrderType::Limit { price: Price(50_000_00000000) },
+        order_type: OrderType::Limit,
         time_in_force: core_types::TimeInForce::Gtc,
     });
 
