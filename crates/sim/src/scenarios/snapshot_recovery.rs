@@ -75,7 +75,7 @@ fn run_truncated_wal_recovery() {
     let result = run_chaos(chaos_cfg, |harness| {
         for i in 0..20u64 {
             harness.push_command(InboundCommand::NewOrder {
-                account:    AccountId((i % 2) as u32),
+                account:    AccountId((i % 2) as u64),
                 client_order_id: core_types::ClientOrderId::new(0),
                 symbol:     Symbol(0),
                 side:       if i % 2 == 0 { Side::Buy } else { Side::Sell },

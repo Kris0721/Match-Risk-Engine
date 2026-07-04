@@ -36,7 +36,7 @@ pub fn run() {
         side:       Side::Buy,
         price:      Price(50_000_00000000),
         qty:        Qty(1_00000000),
-        order_type: OrderType::Limit { price: Price(50_000_00000000) },
+        order_type: OrderType::Limit,
         time_in_force: core_types::TimeInForce::Gtc,
     });
 

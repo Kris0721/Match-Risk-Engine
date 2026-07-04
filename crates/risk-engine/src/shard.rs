@@ -237,7 +237,7 @@ mod tests {
         for state in shard.states.iter_mut() {
             state.update(10_000_00000000, 0, false, false, 0, 0);
         }
-        shard
+        sha rd
     }
 
     fn trade_event(
