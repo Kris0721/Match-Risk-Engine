@@ -6,18 +6,18 @@
 
 use std::time::Instant;
 
-use core_types::{InboundCommand, SequencedCommand};
-use core_types::events::{EngineEvent, Event, Fill, RejectReason, CancelReason};
-use core_types::ids::{AccountId, InstrumentId, OrderId, SequenceNo};
+use core_types::{InboundCommand, RejectReason, SequencedCommand};
+use core_types::events::Event;
+use core_types::ids::SequenceNo;
 use core_types::price::Price;
 
 use order_book::book::OrderBook;
-use ring_buffer::{spsc_queue, SpscConsumer, SpscProducer};
+use ring_buffer::{SpscConsumer, SpscProducer};
 use seqlock::account_risk_state::AccountRiskStateWriter;
 use wal::log::WalWriter;
 
 use crate::metrics::EngineMetrics;
-use crate::risk_check::{check_new_order, RiskRejectReason, Tier0Limits};
+use crate::risk_check::{RiskRejectReason, Tier0Limits};
 
 use crate::mapper::map_engine_event;
 
@@ -132,17 +132,22 @@ impl<W: WalWriter> MatchingEngine<W> {
                         }
                         self.metrics.record_order(n_fills, false);
                     }
-                    Err(reason) => {
+                    Err(_reason) => {
                         self.metrics.record_order(0, true);
                         // Build a Rejected event to publish
                         let seq_no = SequenceNo::new(cmd.seq).unwrap_or(SequenceNo::FIRST);
-                        let ev = Event::Rejected { seq: seq_no, account_id: account, client_order_id, reason: core_types::events::RejectReason::RiskLimitBreach };
+                        let ev = Event::Rejected { 
+                            seq: seq_no, 
+                            account_id: account, 
+                            client_order_id, 
+                            reason: map_risk_reject_reason(reason),
+                         };
                         self.publish_and_log(ev);
                     }
                 }
             }
-            InboundCommand::Cancel { account, order_id } => {
-                let events = self.book.apply(cmd);
+            InboundCommand::Cancel { account: _, order_id} => {
+                let events = self.book.cancel(order_id);
                 for ev in events {
                     if let Some(out_ev) = map_engine_event(ev) {
                         self.publish_and_log(out_ev);
@@ -179,14 +184,14 @@ impl<W: WalWriter> MatchingEngine<W> {
     }
 }
 
-fn reject_reason_code(reason: RiskRejectReason) -> u16 {
+fn map_risk_reject_reason(reason: RiskRejectReason) -> RejectReason {
     match reason {
-        RiskRejectReason::MaxOrderQtyExceeded => 1,
-        RiskRejectReason::MaxOrderNotionalExceeded => 2,
-        RiskRejectReason::AccountHalted => 3,
-        RiskRejectReason::PositionLimitExceeded => 4,
-        RiskRejectReason::OpenOrderLimitExceeded => 5,
-        RiskRejectReason::PriceOutOfBand => 6,
+        RiskRejectReason::MaxOrderQtyExceeded => RejectReason::InvalidQuantity,
+        RiskRejectReason::MaxOrderNotionalExceeded => RejectReason::RiskLimitBreach,
+        RiskRejectReason::AccountHalted => RejectReason::RiskLimitBreach,
+        RiskRejectReason::PositionLimitExceeded => RejectReason::RiskLimitBreach,
+        RiskRejectReason::OpenOrderLimitExceeded => RejectReason::RiskLimitBreach,
+        RiskRejectReason::PriceOutOfBand => RejectReason::PriceOutOfRange,
     }
 }
 

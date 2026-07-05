@@ -100,9 +100,24 @@ impl SimEngine {
         };
         Self { book: OrderBook::new(cfg), symbol }
     }
- 
+
     /// Process one `SequencedCommand` and return any emitted events.
     fn step(&mut self, cmd: SequencedCommand) -> Vec<EngineEvent> {
+        // Routing to this engine is done by the harness purely via vector
+        // index (`me_queues[symbol.0 as usize]`), so nothing enforces that
+        // the command's own `symbol` actually matches this engine. Assert
+        // it here to catch a misrouted command instead of silently
+        // matching it against the wrong instrument's book.
+        debug_assert!(
+            match &cmd.cmd {
+                InboundCommand::NewOrder { symbol, .. }
+                | InboundCommand::Liquidate { symbol, .. } => *symbol == self.symbol,
+                InboundCommand::Cancel { .. } | InboundCommand::FreezeAccount { .. } => true,
+            },
+            "command routed to wrong per-symbol engine: engine_symbol={:?} cmd={:?}",
+            self.symbol,
+            cmd.cmd
+        );
         self.book.apply(cmd).into_iter().collect()
     }
 }

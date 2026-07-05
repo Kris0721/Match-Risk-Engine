@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::collections::HashSet;
 
 use bytes::BytesMut;
-use core_types::{AccountId, Command, Event};
+use core_types::{AccountId, Command, Event, InstrumentId};
 use ring_buffer::SpscProducer;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
