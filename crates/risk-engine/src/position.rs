@@ -58,9 +58,10 @@ impl Position {
         // Realised PnL per unit: (fill_price - avg_entry) * direction_sign
         let direction: i64 = if prev_qty > 0 { 1 } else { -1 };
         let pnl_per_unit = (price.0 - self.avg_entry_price) * direction;
+        let pnl_delta = ((pnl_per_unit as i128 * close_qty as i128) / 100_000_000) as i64;
         self.realised_pnl = self
             .realised_pnl
-            .saturating_add(pnl_per_unit.saturating_mul(close_qty));
+            .saturating_add(pnl_delta);
 
         self.net_qty = new_qty;
 

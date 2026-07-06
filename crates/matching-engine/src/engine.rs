@@ -6,14 +6,14 @@
 
 use std::time::Instant;
 
-use core_types::{InboundCommand, RejectReason, SequencedCommand};
+use core_types::{AccountId, InboundCommand, RejectReason, SequencedCommand, Symbol};
 use core_types::events::Event;
 use core_types::ids::SequenceNo;
 use core_types::price::Price;
 
-use order_book::book::OrderBook;
+use order_book::book::{OrderBook, BookConfig};
 use ring_buffer::{SpscConsumer, SpscProducer};
-use seqlock::account_risk_state::AccountRiskStateWriter;
+use seqlock::account_risk_state::{AccountRiskState, AccountRiskStateWriter};
 use wal::log::WalWriter;
 
 use crate::metrics::EngineMetrics;
@@ -132,7 +132,7 @@ impl<W: WalWriter> MatchingEngine<W> {
                         }
                         self.metrics.record_order(n_fills, false);
                     }
-                    Err(_reason) => {
+                    Err(reason) => {
                         self.metrics.record_order(0, true);
                         // Build a Rejected event to publish
                         let seq_no = SequenceNo::new(cmd.seq).unwrap_or(SequenceNo::FIRST);
@@ -146,8 +146,8 @@ impl<W: WalWriter> MatchingEngine<W> {
                     }
                 }
             }
-            InboundCommand::Cancel { account: _, order_id} => {
-                let events = self.book.cancel(order_id);
+            InboundCommand::Cancel { account: _, order_id: _ } => {
+                let events = self.book.apply(cmd);
                 for ev in events {
                     if let Some(out_ev) = map_engine_event(ev) {
                         self.publish_and_log(out_ev);
@@ -199,26 +199,32 @@ fn map_risk_reject_reason(reason: RiskRejectReason) -> RejectReason {
 mod tests {
     use super::*;
     use core_types::commands::OrderType;
-    use core_types::ids::{InstrumentId, OrderId};
     use core_types::qty::Qty;
     use core_types::side::Side;
-    use ring_buffer::spsc::channel;
+    use ring_buffer::spsc_queue;
     use wal::log::NullWal;
 
     fn mk_engine() -> MatchingEngine<NullWal> {
-        let (_in_tx, in_rx) = spsc_queue::<SequencedCommand, 1024>();
-        let (out_tx, _out_rx) = spsc_queue::<Event, 1024>();
-        let risk_state = AccountRiskStateWriter::new();
+       let (_in_tx, in_rx) = spsc_queue::<SequencedCommand, 1024>();
+       let (out_tx, _out_rx) = spsc_queue::<Event, 1024>();
+       let risk_state = AccountRiskStateWriter::new(AccountRiskState::default());
 
-        MatchingEngine::new(
-            EngineConfig { limits: Tier0Limits::default(), pin_core: None },
-            OrderBook::new(core_types::InstrumentId(1)),
-            in_rx,
-            out_tx,
-            risk_state,
-            NullWal::default(),
-        )
-    }
+       let book_cfg = BookConfig {
+          symbol: Symbol(1),
+          tick_floor: Price::ZERO,
+          num_ticks: 1024,
+          arena_capacity: 4096,
+     };
+
+         MatchingEngine::new(
+      EngineConfig { limits: Tier0Limits::default(), pin_core: None },
+        OrderBook::new(book_cfg),
+     in_rx,
+    out_tx,
+              risk_state,
+          NullWal::default(),
+         )
+   }
 
     #[test]
     fn accepts_and_books_resting_order() {
@@ -234,63 +240,88 @@ mod tests {
     }
 
     #[test]
-    fn matches_crossing_orders() {
-        let mut engine = mk_engine();
+fn matches_crossing_orders() {
+    let mut engine = mk_engine();
 
-        let resting = NewOrder {
-            order_id: OrderId(1 << 48),
-            instrument: InstrumentId(1),
+    let resting = SequencedCommand {
+        seq: 1,
+        ts_ns: 0,
+        cmd: InboundCommand::NewOrder {
+            account: AccountId(1),
+            client_order_id: core_types::ClientOrderId::new(0),
+            symbol: core_types::Symbol(1),
             side: Side::Sell,
-            order_type: OrderType::Limit,
-            price: Some(Price::from_raw(100)),
+            price: Price::from_raw(100),
             qty: Qty::from_raw(10),
-        };
-        engine.handle_command(Command::NewOrder(resting));
+            order_type: OrderType::Limit,
+            time_in_force: core_types::TimeInForce::Gtc,
+        },
+    };
+    engine.handle_command(resting);
 
-        let aggressor = NewOrder {
-            order_id: OrderId((1 << 48) | 2),
-            instrument: InstrumentId(1),
+    let aggressor = SequencedCommand {
+        seq: 2,
+        ts_ns: 0,
+        cmd: InboundCommand::NewOrder {
+            account: AccountId(2),
+            client_order_id: core_types::ClientOrderId::new(1),
+            symbol: core_types::Symbol(1),
             side: Side::Buy,
-            order_type: OrderType::Limit,
-            price: Some(Price::from_raw(100)),
+            price: Price::from_raw(100),
             qty: Qty::from_raw(10),
-        };
-        engine.handle_command(Command::NewOrder(aggressor));
+            order_type: OrderType::Limit,
+            time_in_force: core_types::TimeInForce::Gtc,
+        },
+    };
+    engine.handle_command(aggressor);
 
-        let snap = engine.metrics().snapshot();
-        assert_eq!(snap.orders_processed, 2);
-        assert!(snap.fills_generated >= 1);
-    }
+    let snap = engine.metrics().snapshot();
+    assert_eq!(snap.orders_processed, 2);
+    assert!(snap.fills_generated >= 1);
+}
 
-    #[test]
-    fn rejects_order_violating_tier0_limits() {
-        let (_in_tx, in_rx) = channel::<Command>(1024);
-        let (out_tx, _out_rx) = channel::<Event>(1024);
-        let risk_state = AccountRiskStateWriter::new();
+#[test]
+fn rejects_order_violating_tier0_limits() {
+    let (_in_tx, in_rx) = spsc_queue::<SequencedCommand, 1024>();
+    let (out_tx, _out_rx) = spsc_queue::<Event, 1024>();
+    let risk_state = AccountRiskStateWriter::new(AccountRiskState::default());
 
-        let mut engine = MatchingEngine::new(
-            EngineConfig {
-                limits: Tier0Limits { max_order_qty: Qty::from_raw(5), ..Default::default() },
-                pin_core: None,
-            },
-            OrderBook::new(InstrumentId(1)),
-            in_rx,
-            out_tx,
-            risk_state,
-            NullWal::default(),
-        );
+    let book_cfg = BookConfig {
+        symbol: Symbol(1),
+        tick_floor: Price::ZERO,
+        num_ticks: 1024,
+        arena_capacity: 4096,
+    };
 
-        let order = NewOrder {
-            order_id: OrderId(1 << 48),
-            instrument: InstrumentId(1),
+    let mut engine = MatchingEngine::new(
+        EngineConfig {
+            limits: Tier0Limits { max_order_qty: Qty::from_raw(5), ..Default::default() },
+            pin_core: None,
+        },
+        OrderBook::new(book_cfg),
+        in_rx,
+        out_tx,
+        risk_state,
+        NullWal::default(),
+    );
+
+    let order = SequencedCommand {
+        seq: 1,
+        ts_ns: 0,
+        cmd: InboundCommand::NewOrder {
+            account: AccountId(1),
+            client_order_id: core_types::ClientOrderId::new(0),
+            symbol: core_types::Symbol(1),
             side: Side::Buy,
-            order_type: OrderType::Limit,
-            price: Some(Price::from_raw(100)),
+            price: Price::from_raw(100),
             qty: Qty::from_raw(10),
-        };
-        engine.handle_command(Command::NewOrder(order));
+            order_type: OrderType::Limit,
+            time_in_force: core_types::TimeInForce::Gtc,
+        },
+    };
+    engine.handle_command(order);
 
-        let snap = engine.metrics().snapshot();
-        assert_eq!(snap.risk_rejects, 1);
-    }
+    let snap = engine.metrics().snapshot();
+    assert_eq!(snap.risk_rejects, 1);
+}
 }

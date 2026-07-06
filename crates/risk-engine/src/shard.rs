@@ -16,7 +16,7 @@
 use std::collections::HashMap;
 use std::ops::Range;
 
-use core_types::{AccountId, EngineEvent, InboundCommand, Price, Symbol};
+use core_types::{AccountId, EngineEvent, InboundCommand, Price, Symbol, OrderId};
 use ring_buffer::{SpmcConsumer, SpscProducer};
 use seqlock::AccountRiskState;
 
@@ -249,12 +249,19 @@ mod tests {
     ) -> EngineEvent {
         EngineEvent::Trade {
             seq: 1,
+            ts_ns: 0,
             maker_acct: maker,
             taker_acct: taker,
             maker_side: Side::Buy,
-            symbol,
+            symbol, 
             price,
             qty,
+            maker_order: OrderId(0),
+            taker_order: OrderId(0),
+            maker_order_id: OrderId(0),
+            taker_order_id: OrderId(0),
+            maker_remaining_qty: Qty(0),
+            taker_remaining_qty: Qty(0),
         }
     }
 

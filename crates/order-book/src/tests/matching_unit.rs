@@ -39,7 +39,7 @@ fn new_limit(
     account: AccountId,
     side: Side,
     price: i64,
-    qty: i64,
+    qty: u64,
 ) -> SequencedCommand {
     seq_cmd(
         seq,
@@ -62,7 +62,7 @@ fn new_ioc(
     account: AccountId,
     side: Side,
     price: i64,
-    qty: i64,
+    qty: u64,
 ) -> SequencedCommand {
     seq_cmd(
         seq,
@@ -377,7 +377,7 @@ fn sweep_multiple_levels() {
     let t = trades(&evs);
     assert_eq!(t.len(), 3, "three fill events");
 
-    let total_filled: i64 = t
+    let total_filled: u64 = t
         .iter()
         .map(|e| {
             if let EngineEvent::Trade { qty, .. } = e {

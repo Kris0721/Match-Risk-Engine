@@ -102,7 +102,6 @@ impl AccountRiskState {
 
     /// Convenience setter used in tests — writes only the halted flag,
     /// preserving all other fields.
-    #[cfg(test)]
     pub fn set_halted(&self, halted: bool) {
         let s = self.read();
         self.update(s.balance, s.used_margin, s.frozen,
@@ -110,7 +109,6 @@ impl AccountRiskState {
     }
 
     /// Convenience setter used in tests — writes only the position field.
-    #[cfg(test)]
     pub fn set_position(&self, position: i64) {
         let s = self.read();
         self.update(s.balance, s.used_margin, s.frozen,

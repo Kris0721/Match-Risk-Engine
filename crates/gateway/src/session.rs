@@ -395,7 +395,7 @@ mod tests {
     use core_types::{AccountId, ClientOrderId, InstrumentId, OrderId, Price, Qty, Side};
     use ring_buffer::spsc;
 
-    fn make_session() -> (Session, ring_buffer::spsc::Consumer<Command>) {
+    fn make_session() -> (Session, ring_buffer::spsc::SpscConsumer<Command, 4096>) {
         let (producer, consumer) = spsc::spsc_queue::<Command, 4096>();
         let session = Session::new(SessionId(1), AccountId::new(42), producer);
         (session, consumer)
@@ -433,12 +433,11 @@ mod tests {
                 assert_eq!(n.client_order_id, ClientOrderId::new(7));
                 assert_eq!(n.side, Side::Buy);
                 assert_eq!(n.qty, Qty::new(5));
-                match n.order_type {
-                    core_types::OrderType::Limit { price } => assert_eq!(price, Price::new(10_050)),
-                    _ => panic!("expected limit order"),
-                }
-            }
-            _ => panic!("expected New command"),
+                assert_eq!(n.order_type, core_types::OrderType::Limit);
+                assert_eq!(n.price, Price::new(10_050));
+            }                   
+             _ => panic!("expected limit order"),
+            
         }
     }
 

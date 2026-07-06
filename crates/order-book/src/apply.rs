@@ -153,7 +153,7 @@ impl OrderBook {
                 });
             }
             if qty_remaining.0 < qty.0 {
-                events.push(EngineEvent::OrderCancelled { order_id, account_id: account, seq, symbol });
+                events.push(EngineEvent::Cancelled { seq, order_id});
             }
             events.push(self.book_top_event(seq, symbol));
             return events;

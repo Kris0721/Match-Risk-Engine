@@ -128,7 +128,7 @@ async fn handle_connection(
     // First frame must be a NEW_ORDER-protocol-agnostic auth frame:
     // payload = u64 account_id. In production this would validate a
     // signed token; here we trust the client-supplied id.
-    let account_id = read_auth_frame(&mut read_half, read_buf_capacity).await?;
+    let (account_id, mut read_buf) = read_auth_frame(&mut read_half, read_buf_capacity).await?;
 
     let mut session = Session::new(session_id, account_id, cmd_producer);
     // TODO: load ArcSwap<RiskConfig> for this account and pass to Session
@@ -151,18 +151,12 @@ async fn handle_connection(
         }
     });
 
-    let mut read_buf = BytesMut::with_capacity(read_buf_capacity);
     let mut forwarded: HashSet<InstrumentId> = HashSet::new();
+    
 
     loop {
-        // Read more bytes from the socket.
-        let n = read_half.read_buf(&mut read_buf).await?;
-        if n == 0 {
-            // Connection closed by peer.
-            break;
-        }
-
-        // Process as many complete frames as are buffered.
+        // Process as many complete frames as are already buffered
+        // (this also drains any leftover bytes from the auth handshake).
         loop {
             match session.handle_inbound(&mut read_buf) {
                 Ok(Some(SessionAction::WriteFrame(frame))) => {
@@ -184,6 +178,15 @@ async fn handle_connection(
                 }
             }
         }
+
+        // Read more bytes from the socket.
+        let n = read_half.read_buf(&mut read_buf).await?;
+        if n == 0 {
+            // Connection closed by peer.
+            break;
+        }
+    
+                
 
         // After processing inbound frames, spawn forwarders for any
         // newly-added subscriptions. (Idempotent: in a real impl we'd
@@ -217,7 +220,7 @@ async fn handle_connection(
 
 /// Reads a single length-prefixed auth frame and extracts the
 /// `AccountId` from its payload (`u64`, little-endian).
-async fn read_auth_frame<R: AsyncReadExt + Unpin>(reader: &mut R, capacity: usize) -> std::io::Result<AccountId> {
+async fn read_auth_frame<R: AsyncReadExt + Unpin>(reader: &mut R, capacity: usize) -> std::io::Result<(AccountId, BytesMut)> {
     let codec = Codec;
     let mut buf = BytesMut::with_capacity(capacity);
 
@@ -228,7 +231,8 @@ async fn read_auth_frame<R: AsyncReadExt + Unpin>(reader: &mut R, capacity: usiz
             }
             let mut p = &frame.payload[..];
             use bytes::Buf;
-            let _raw = p.get_u64_le();   
+            let raw = p.get_u64_le();
+            return Ok((AccountId::new(raw), buf));
         }
 
         let n = reader.read_buf(&mut buf).await?;
@@ -349,7 +353,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 
-        let (producer, mut consumer) = spsc::channel::<Command>(16);
+        let (producer, mut consumer) = ring_buffer::spsc::spsc_queue::<Command, 4096>();
 
         let server_task = tokio::spawn(async move {
             let (stream, peer) = listener.accept().await.unwrap();
@@ -387,17 +391,16 @@ mod tests {
 
         let cmd = consumer.try_pop().expect("expected enqueued command");
         match cmd {
-            Command::New(NewOrder { account_id, instrument_id, client_order_id, side, qty, order_type, time_in_force }) => {
+            Command::New(NewOrder { account_id, instrument_id, client_order_id, side, price, qty, order_type, time_in_force }) => {
                 assert_eq!(account_id, AccountId::new(42));
                 assert_eq!(instrument_id, InstrumentId::new(5));
                 assert_eq!(client_order_id, ClientOrderId::new(1));
                 assert_eq!(side, Side::Buy);
                 assert_eq!(qty, Qty::new(3));
                 assert_eq!(time_in_force, TimeInForce::Gtc);
-                match order_type {
-                    OrderType::Limit { price } => assert_eq!(price, Price::new(10_000)),
-                    _ => panic!("expected limit"),
-                }
+                assert_eq!(order_type, OrderType::Limit);
+                assert_eq!(price, Price::new(10_000));
+                
             }
             _ => panic!("expected New command"),
         }

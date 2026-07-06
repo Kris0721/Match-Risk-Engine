@@ -39,10 +39,10 @@ impl RefBook {
         }
     }
 
-    fn apply(&mut self, cmd: &SequencedCommand) -> i64 {
+    fn apply(&mut self, cmd: &SequencedCommand) -> u64 {
         match &cmd.cmd {
-            InboundCommand::NewOrder { side, price, qty, account, order_type, .. } => {
-                self.ref_new_order(cmd.seq, *side, *price, *qty, *account, *order_type)
+            InboundCommand::NewOrder { side, price, qty, account, order_type, time_in_force, .. } => {
+                self.ref_new_order(cmd.seq, *side, *price, *qty, *account, *order_type, *time_in_force )
             }
             InboundCommand::Cancel { account, order_id } => {
                 self.ref_cancel(*order_id, *account);
@@ -60,10 +60,11 @@ impl RefBook {
         qty: Qty,
         account: AccountId,
         order_type: OrderType,
-    ) -> i64 {
+        time_in_force: TimeInForce,
+    ) -> u64 {
         let order_id = OrderId(seq);
         let mut qty_rem = qty.0;
-        let mut total_filled = 0i64;
+        let mut total_filled = 0u64;
 
         loop {
             if qty_rem == 0 {
@@ -79,10 +80,20 @@ impl RefBook {
                     }
                 }
                 Side::Sell => {
-                    // Best bid = largest (price, seq) — BTreeMap is ascending;
-                    // we want the last entry.
+                    // Best bid = largest price. Among orders tied at that price, we
+                    // need the *earliest* (smallest seq) for correct time priority —
+                    // `next_back()` alone would give the largest seq at that price,
+                    // which is backwards. So find the best price first, then scan
+                    // for the minimum-seq entry within that price band.
                     match self.bids.iter().next_back() {
-                        Some((&k, _)) if price.0 <= k.0 => (true, Some(k)),
+                        Some((&(best_price, _), _)) if price.0 <= best_price => {
+                            let key = self
+                                .bids
+                                .range((best_price, 0)..=(best_price, u64::MAX))
+                                .next()
+                                .map(|(&k, _)| k);
+                            (true, key)
+                        }
                         _ => (false, None),
                     }
                 }
@@ -111,7 +122,7 @@ impl RefBook {
         }
 
         // Rest remainder for Limit orders.
-        if qty_rem > 0 && order_type == OrderType::Limit {
+        if qty_rem > 0 && order_type == OrderType::Limit && time_in_force == TimeInForce::Gtc  {
             let k = (price.0, seq);
             match side {
                 Side::Buy  => { self.bids.insert(k, (order_id, account, Qty(qty_rem))); }
@@ -195,7 +206,7 @@ fn gen_commands(rng: &mut StdRng, n: usize) -> Vec<SequencedCommand> {
 }
 
 /// Sum the filled quantity from a slice of events.
-fn total_filled(events: &[EngineEvent]) -> i64 {
+fn total_filled(events: &[EngineEvent]) -> u64 {
     events
         .iter()
         .map(|e| {
@@ -250,3 +261,4 @@ fn differential_fuzz_soak() {
         run_one_trial(seed, 2_000);
     }
 }
+
