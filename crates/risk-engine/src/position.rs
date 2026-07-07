@@ -43,12 +43,15 @@ impl Position {
         }
 
         // Same direction: increase position, recalculate VWAP.
+        
         if (prev_qty > 0) == (signed_qty > 0) {
             // avg = (prev_avg * |prev_qty| + price * qty) / |new_qty|
-            let numerator = self.avg_entry_price
-                .saturating_mul(prev_qty.abs())
-                .saturating_add(price.0.saturating_mul(qty.0 as i64));
-            self.avg_entry_price = numerator / new_qty.abs();
+            // Use i128 intermediates: avg_entry_price and qty are both 1e8-scaled,
+            // so their product alone (before adding the two terms or dividing) can
+            // exceed i64::MAX for large positions — same shape as the pnl_delta fix.
+            let numerator = (self.avg_entry_price as i128) * (prev_qty.abs() as i128)
+                + (price.0 as i128) * (qty.0 as i128);
+            self.avg_entry_price = (numerator / (new_qty.abs() as i128)) as i64;
             self.net_qty = new_qty;
             return;
         }
@@ -81,17 +84,16 @@ impl Position {
             return 0;
         }
         let direction: i64 = if self.net_qty > 0 { 1 } else { -1 };
-        (mark_price.0 - self.avg_entry_price)
-            .saturating_mul(self.net_qty.abs())
-            .saturating_mul(direction)
-            // Divide out double-scale: price(1e8) * qty(1e8) / 1e8 = quote(1e8)
-            / 100_000_000
+        let diff = (mark_price.0 - self.avg_entry_price) as i128;
+        let qty = self.net_qty.abs() as i128;
+        // Divide out double-scale: price(1e8) * qty(1e8) / 1e8 = quote(1e8)
+        ((diff * qty / 100_000_000) as i64) * direction
     }
 
     /// Notional value of the current position at mark price (always positive).
     #[inline]
     pub fn notional(&self, mark_price: Price) -> i64 {
-        mark_price.0.saturating_mul(self.net_qty.abs()) / 100_000_000
+        ((mark_price.0 as i128 * self.net_qty.abs() as i128) / 100_000_000) as i64
     }
 }
 

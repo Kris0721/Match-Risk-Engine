@@ -40,6 +40,7 @@ pub struct RiskShard {
     /// Seqlock states for each account this shard owns.
     /// Indexed by `account_id - owned.start`.
     pub states: Vec<AccountRiskState>,
+    initial_deposits: Vec<i64>,
     /// Config / limits.
     pub config: ShardConfig,
 }
@@ -52,8 +53,19 @@ impl RiskShard {
             owned,
             positions: HashMap::new(),
             states,
+            initial_deposits: vec![0; n],
             config,
         }
+    }
+
+    /// Seed an owned account's starting cash deposit and publish its initial
+    /// state. Call this once per account at shard startup (deposits/withdrawals
+    /// after that would need a similar dedicated method — not implemented here).
+    pub fn seed_deposit(&mut self, account: AccountId, amount: i64) {
+        let idx = self.state_idx(account);
+        self.initial_deposits[idx] = amount;
+        let s = self.states[idx].read();
+        self.states[idx].update(amount, 0, s.frozen, s.halted, s.position, s.open_order_count);
     }
 
     /// Returns `true` if this shard owns `account`.
@@ -153,17 +165,16 @@ impl RiskShard {
     ///
     /// This is intentionally simplified — a real system would also track
     /// funding payments, fees, deposits/withdrawals, etc.
-    fn recompute_margin(
-        &self,
-        account: AccountId,
-        mark_prices: &MarkPrices,
-    ) -> (i64, i64) {
+    
+    fn recompute_margin(&self, account: AccountId, mark_prices: &MarkPrices) -> (i64, i64) {
         let limits = &self.config.limits;
-        // Retrieve the current balance from the seqlock (includes prior deposits).
         let idx = self.state_idx(account);
-        let snap = self.states[idx].read();
-        let mut balance = snap.balance;
-        let mut used_margin: i64 = 0;
+        // Always start from the fixed deposit, never from a previously-published
+        // balance — that value already had this account's cumulative realised_pnl
+        // folded in last time this function ran, so reading it back here would
+        // double-count every fill's PnL on every subsequent recompute.
+        let mut balance = self.initial_deposits[idx];
+        let mut used_margin: i64 = 0;    
 
         for ((acct, symbol), pos) in &self.positions {
             if *acct != account {
@@ -233,9 +244,9 @@ mod tests {
     fn make_shard(n_accounts: usize) -> RiskShard {
         let config = ShardConfig::new(n_accounts);
         let mut shard = RiskShard::new(0..n_accounts as u64, config);
-        // Seed each account with 10,000 USD balance (1e8 scale).
-        for state in shard.states.iter_mut() {
-            state.update(10_000_00000000, 0, false, false, 0, 0);
+        // Seed each account with 10,000 USD deposit (1e8 scale).
+        for i in 0..n_accounts {
+            shard.seed_deposit(AccountId(i as u64), 10_000_00000000);
         }
         shard
     }

@@ -13,6 +13,8 @@ pub fn run() {
         n_risk_shards: 1,
         // Tiny initial balance so margin is breached easily.
         initial_balance: 100_00000000, // 100 USD
+        book_tick_floor: Price(50_000_00000000 - 1000),
+        book_num_ticks:  2000,  
         ..Default::default()
     };
 

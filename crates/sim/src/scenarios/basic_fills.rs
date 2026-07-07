@@ -11,6 +11,8 @@ pub fn run() {
         n_symbols:    1,
         n_accounts:   2,
         n_risk_shards: 1,
+        book_tick_floor: Price(50_000_00000000 - 1000),
+        book_num_ticks:  2000,
         ..Default::default()
     };
 

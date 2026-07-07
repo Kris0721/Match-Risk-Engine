@@ -54,6 +54,10 @@ pub struct SimConfig {
     pub initial_balance: i64,
     /// Snapshot interval in sequenced commands.
     pub snapshot_interval: u64,
+    /// Lowest price the per-symbol order-book ladder covers.
+    pub book_tick_floor: Price,
+    /// Number of price ticks the ladder covers, starting at `book_tick_floor`.
+    pub book_num_ticks: usize,
 }
 
 impl Default for SimConfig {
@@ -64,6 +68,8 @@ impl Default for SimConfig {
             n_risk_shards:     2,
             initial_balance:   100_000_00000000, // 100,000 USD
             snapshot_interval: 1_000,
+            book_tick_floor:   Price::ZERO,
+            book_num_ticks:    1024,
         }
     }
 }
@@ -90,12 +96,11 @@ struct SimEngine {
 }
  
 impl SimEngine {
-    fn new(symbol: Symbol) -> Self {
-        // Choose a conservative ladder size and arena capacity for the sim.
+    fn new(symbol: Symbol, tick_floor: Price, num_ticks: usize) -> Self {
         let cfg = BookConfig {
             symbol,
-            tick_floor: Price::ZERO,
-            num_ticks: 1024,
+            tick_floor,
+            num_ticks,
             arena_capacity: 4096,
         };
         Self { book: OrderBook::new(cfg), symbol }
@@ -163,7 +168,7 @@ impl SimHarness {
         );
 
         let engines: Vec<SimEngine> = (0..config.n_symbols)
-            .map(|i| SimEngine::new(Symbol(i as u16)))
+            .map(|i| SimEngine::new(Symbol(i as u16), config.book_tick_floor, config.book_num_ticks))
             .collect();
 
         let me_queues = (0..config.n_symbols)
@@ -178,8 +183,8 @@ impl SimHarness {
                 let shard_config = ShardConfig::new(accounts_per_shard);
                 let mut shard = RiskShard::new(start..end, shard_config);
                 // Seed every account with the initial balance.
-                for state in shard.states.iter_mut() {
-                    state.update(config.initial_balance, 0, false, false, 0, 0);
+                for account_id in start..end {
+                    shard.seed_deposit(AccountId(account_id), config.initial_balance);
                 }
                 shard
             })

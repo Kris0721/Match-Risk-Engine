@@ -310,10 +310,12 @@ mod tests {
     fn timed_out_pending_entries_are_escalated() {
         let (mut sorter, rx, ring) = mk_sorter();
 
+        sorter.clock_origin = std::time::Instant::now() - std::time::Duration::from_secs(1);
+
         // Create entry with timestamp_in far in the past so it times out
         let entry = Arc::new(LogEntry::new(
             1,
-            0, // timestamp_in = 0, age will be huge
+             0, // timestamp_in = 0, age will be huge
             InboundCommand::NewOrder {
                 account: AccountId(1),
                 client_order_id: ClientOrderId::new(1),
