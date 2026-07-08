@@ -221,17 +221,42 @@ impl<C: Clock> Sequencer<C> {
 
         // --- Route to the correct matching engine ---
         let symbol = cmd_symbol(&cmd);
-        if let Some(symbol) = symbol {
-            let idx = symbol.0 as usize;
-            debug_assert!(idx < self.me_inbound.len(), "unknown symbol index {idx}");
+        match symbol {
+            Some(symbol) => {
+                let idx = symbol.0 as usize;
+                debug_assert!(idx < self.me_inbound.len(), "unknown symbol index {idx}");
 
-            // Spin on full ME queue — the matching engine must never be starved.
-            // In practice the queue should be large enough that this never spins.
-            loop {
-                match self.me_inbound[idx].try_push(sequenced.clone()) {
-                    Ok(()) => break,
-                    Err(_) => std::hint::spin_loop(),
+                // Spin on full ME queue — the matching engine must never be starved.
+                // In practice the queue should be large enough that this never spins.
+                loop {
+                    match self.me_inbound[idx].try_push(sequenced.clone()) {
+                        Ok(()) => break,
+                        Err(_) => std::hint::spin_loop(),
+                    }
                 }
+            }
+            None => {
+                if matches!(cmd, InboundCommand::Cancel { .. }) {
+            // The sequencer doesn't track which symbol an order_id
+            // belongs to, so broadcast the cancel to every matching
+            // engine. Each engine's OrderBook safely rejects cancels for
+            // order ids it doesn't own (OrderNotFound, no state change —
+            // see apply_cancel), so exactly one engine acts on this and
+            // the rest are harmless no-ops.
+                    for me in self.me_inbound.iter_mut() {
+                        loop {
+                            match me.try_push(sequenced.clone()) {
+                                Ok(()) => break,
+                                Err(_) => std::hint::spin_loop(),
+                            }
+                        }
+                    }
+                }
+            
+            // FreezeAccount and other privileged, symbol-less commands are
+            // handled by routing to all shards via the WAL + a separate
+            // privileged channel (not modelled here — extend `snapshot_out`
+            // or add a dedicated queue).
             }
         }
         // Privileged commands with no symbol (e.g. FreezeAccount) are handled
