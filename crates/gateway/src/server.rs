@@ -311,6 +311,7 @@ fn encode_market_data(codec: &Codec, ev: &crate::market_data::MarketDataEvent, o
 /// mechanism is intentionally left abstract here (`sessions` is a
 /// caller-provided lookup function) since its concrete form depends
 /// on how `server.rs` is integrated with `sim`/production wiring.
+#[cfg(feature = "session_dispatch")]
 pub async fn dispatch_event_to_sessions<L>(ev: &Event, sessions: &L)
 where
     L: Fn(AccountId) -> Option<tokio::sync::mpsc::Sender<BytesMut>>,
@@ -327,11 +328,10 @@ where
 
     for account_id in accounts {
         if let Some(_tx) = sessions(account_id) {
-            // TODO: wire to real session registry.
-            // let mut buf = BytesMut::new();
-            // session.encode_event(ev, &mut buf);
-            // let _ = tx.send(buf).await;
-            todo!("dispatch_event_to_sessions: wire session registry before sim integration");  
+            unimplemented!(
+                "dispatch_event_to_sessions: session registry not wired up — \
+                 see the doc comment on this function for what's blocking it"
+            );
         }
     }
 }
