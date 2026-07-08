@@ -59,7 +59,7 @@ impl AccountRiskState {
                   halted: bool, position: i64, open_order_count: u32) {
         let seq = self.seq.load(Ordering::Relaxed);
         debug_assert!(seq % 2 == 0, "seqlock: concurrent update");
-        self.seq.store(seq.wrapping_add(1), Ordering::Relaxed);
+        self.seq.store(seq.wrapping_add(1), Ordering::Release);
         unsafe {
             *self.balance.get()          = balance;
             *self.used_margin.get()      = used_margin;
