@@ -284,9 +284,7 @@ impl SimHarness {
                 result.events.push(ev.clone());
 
                 for shard in self.shards.iter_mut() {
-                    if let Some(liquidate_cmd) =
-                        shard.process_event(ev.clone(), &self.mark_prices)
-                    {
+                    for liquidate_cmd in shard.process_event(ev.clone(), &self.mark_prices) {
                         result.liquidations += 1;
                         // Re-inject as a privileged command.
                         self.inbound.push_front(liquidate_cmd);

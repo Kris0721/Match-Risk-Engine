@@ -88,7 +88,7 @@ impl RiskShard {
         &mut self,
         event: EngineEvent,
         mark_prices: &MarkPrices,
-    ) -> Option<InboundCommand> {
+    ) -> Vec<InboundCommand> {
         match event {
             EngineEvent::Trade {
                 maker_acct,
@@ -99,7 +99,7 @@ impl RiskShard {
                 maker_side,
                 ..
             } => {
-                let mut liquidate_cmd: Option<InboundCommand> = None;
+                let mut liquidate_cmds: Vec<InboundCommand> = Vec::new();
 
                 for (acct, side) in [
                     (maker_acct, maker_side),
@@ -127,7 +127,7 @@ impl RiskShard {
 
                     // Trigger liquidation if maintenance margin breached.
                     if used_margin > balance {
-                        liquidate_cmd = Some(InboundCommand::Liquidate {
+                        liquidate_cmds.push(InboundCommand::Liquidate {
                             account: acct,
                             symbol,
                         });
@@ -137,14 +137,14 @@ impl RiskShard {
                     }
                 }
 
-                liquidate_cmd
+                liquidate_cmds
             }
             
             EngineEvent::OrderCancelled { account_id, .. }
             | EngineEvent::OrderRejected { account_id, .. } => {
                 // No position change; nothing to do for the risk shard.
                 let _ = account_id;
-                None
+                Vec::new()
             }
 
             EngineEvent::SnapshotMarker { seq } => {
@@ -152,9 +152,9 @@ impl RiskShard {
                 // In production this calls into the WAL/snapshot crate.
                 // Here we just log the marker.
                 eprintln!("[risk-shard {:?}] snapshot at seq={}", self.owned, seq);
-                None
+                Vec::new()
             }
-            _ => None
+            _ => Vec::new()
         }
     }
 
@@ -222,7 +222,7 @@ pub fn run_risk_shard(
             continue;
         };
 
-        if let Some(cmd) = shard.process_event(event, mark_prices) {
+        for cmd in shard.process_event(event, mark_prices) {
             // Best-effort: if the command queue is full the market is in
             // distress. We spin here because a missed liquidation is worse
             // than latency. In production add a circuit-breaker timeout.
@@ -290,7 +290,7 @@ mod tests {
         );
 
         let result = shard.process_event(ev, &marks);
-        assert!(result.is_none(), "no liquidation expected");
+        assert!(result.is_empty(), "no liquidation expected");
 
         let pos = shard.positions.get(&(AccountId(0), Symbol(0))).unwrap();
         assert_eq!(pos.net_qty, 1_00000000); // maker bought
@@ -320,7 +320,7 @@ mod tests {
 
         let result = shard.process_event(ev, &marks);
         assert!(
-            matches!(result, Some(InboundCommand::Liquidate { account: AccountId(0), .. })),
+            result.iter().any(|cmd| matches!(cmd, InboundCommand::Liquidate { account: AccountId(0), .. })),
             "expected liquidation command"
         );
         // Account should be frozen after breach.
