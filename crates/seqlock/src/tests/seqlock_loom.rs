@@ -21,7 +21,7 @@ fn seqlock_single_writer_single_reader() {
 
         let writer_state = Arc::clone(&state);
         let writer = thread::spawn(move || {
-            writer_state.update(1_000, 200, false);
+            writer_state.update(1_000, 200, false, false, 0, 0);
         });
 
         let reader_state = Arc::clone(&state);
@@ -50,7 +50,7 @@ fn seqlock_single_writer_two_readers() {
 
         let ws = Arc::clone(&state);
         let writer = thread::spawn(move || {
-            ws.update(500, 100, false);
+            ws.update(500, 100, false, false, 0, 0);
         });
 
         let rs0 = Arc::clone(&state);
@@ -84,8 +84,8 @@ fn seqlock_two_sequential_writes() {
 
         let ws = Arc::clone(&state);
         let writer = thread::spawn(move || {
-            ws.update(100, 10, false);
-            ws.update(200, 20, true);
+            ws.update(100, 10, false, false, 0, 0);
+            ws.update(200, 20, true, false, 0, 0);
         });
 
         let rs = Arc::clone(&state);
@@ -110,12 +110,12 @@ fn seqlock_frozen_flag_consistent() {
         let state = Arc::new(AccountRiskState::new());
 
         // First write: high balance, not frozen.
-        state.update(10_000, 0, false);
+        state.update(10_000, 0, false, false, 0, 0);
 
         let ws = Arc::clone(&state);
         let writer = thread::spawn(move || {
             // Second write: margin breach → frozen.
-            ws.update(10_000, 15_000, true);
+            ws.update(10_000, 15_000, true, false, 0, 0);
         });
 
         let rs = Arc::clone(&state);
@@ -140,7 +140,7 @@ fn seqlock_is_frozen_matches_read() {
 
         let ws = Arc::clone(&state);
         let writer = thread::spawn(move || {
-            ws.update(0, 0, true);
+            ws.update(0, 0, true, false, 0, 0);
         });
 
         let rs = Arc::clone(&state);
