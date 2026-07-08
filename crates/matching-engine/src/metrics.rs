@@ -61,18 +61,17 @@ pub struct LatencySnapshot {
 /// Aggregate engine metrics for a single matching shard.
 #[derive(Debug, Default)]
 pub struct EngineMetrics {
-    /// End-to-end: sequencer enqueue -> matching applied.
     pub match_latency: LatencyStats,
-    /// Risk check sub-latency (subset of match_latency).
     pub risk_check_latency: LatencyStats,
-    /// Number of orders processed since last reset.
     pub orders_processed: AtomicU64,
-    /// Number of fills generated since last reset.
     pub fills_generated: AtomicU64,
-    /// Number of orders rejected by risk checks.
     pub risk_rejects: AtomicU64,
-    /// Number of times the inbound ring buffer was empty (idle spins).
     pub idle_spins: AtomicU64,
+    /// Number of outbound events dropped because the ring stayed full
+    /// past the bounded retry window. This must be 0 in a healthy system;
+    /// any nonzero value means fills/events were lost and downstream
+    /// state (risk shards, gateway sessions) has silently gone stale.
+    pub outbound_drops: AtomicU64,
 }
 
 impl EngineMetrics {
@@ -84,6 +83,7 @@ impl EngineMetrics {
             fills_generated: AtomicU64::new(0),
             risk_rejects: AtomicU64::new(0),
             idle_spins: AtomicU64::new(0),
+            outbound_drops: AtomicU64::new(0),
         }
     }
 
@@ -100,6 +100,11 @@ impl EngineMetrics {
     #[inline]
     pub fn record_idle_spin(&self) {
         self.idle_spins.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline]
+    pub fn record_outbound_drop(&self) {
+        self.outbound_drops.fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn snapshot(&self) -> EngineMetricsSnapshot {

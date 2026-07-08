@@ -178,9 +178,32 @@ impl<W: WalWriter> MatchingEngine<W> {
             debug_assert!(false, "WAL append failed: {:?}", e);
         }
 
-        // Best-effort publish; if the outbound ring is full we drop the
-        // oldest-style backpressure to the gateway (gateway must keep up).
-        let _ = self.outbound.try_push(ev);
+        // Bounded spin-retry: the outbound consumer (risk shards / gateway
+        // forwarders) should normally drain within a handful of spins. If
+        // it's still full after that, the consumer is genuinely stuck or
+        // overloaded — at that point dropping is a real data-loss event,
+        // not routine backpressure, so it must be recorded rather than
+        // silently discarded.
+        const MAX_PUBLISH_RETRIES: u32 = 64;
+
+        let mut item = ev;
+        for _ in 0..MAX_PUBLISH_RETRIES {
+            match self.outbound.try_push(item) {
+                Ok(()) => return,
+                Err(rejected) => {
+                    item = rejected;
+                    std::hint::spin_loop();
+                }
+            }
+        }
+
+        // Circuit-broken: still full after MAX_PUBLISH_RETRIES spins.
+        // Surface this loudly instead of pretending the event was delivered.
+        self.metrics.record_outbound_drop();
+        logger::warn(&format!(
+            "matching-engine: outbound ring full after {MAX_PUBLISH_RETRIES} retries, \
+             dropping event: {item:?}"
+        ));
     }
 }
 
