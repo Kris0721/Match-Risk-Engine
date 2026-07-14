@@ -181,51 +181,52 @@ impl FileWalWriter {
     ///
     /// Returns the byte offset of the record just written.
     pub fn append(&mut self, sc: &SequencedCommand) -> Result<usize, WalError> {
-        debug_assert!(
-            sc.seq > self.last_seq,
-            "WAL: sequence numbers must be strictly increasing (got {} after {})",
-            sc.seq, self.last_seq
-        );
+    debug_assert!(
+        sc.seq > self.last_seq,
+        "WAL: sequence numbers must be strictly increasing (got {} after {})",
+        sc.seq, self.last_seq
+    );
 
-        // Serialise the payload into a stack buffer.
-        let payload = serialise_command(&sc.cmd)?;
-        let payload_len = payload.len();
+    let payload = serialise_command(&sc.cmd)?;
+    self.write_record(sc.seq, sc.ts_ns, &payload)
+}
 
-        let record_size = align8(RECORD_HEADER_SIZE + payload_len);
-        let end = self.cursor + record_size;
+/// Writes one record (header + payload + padding) at the current cursor,
+/// advances the cursor, and updates `last_seq`. Shared by `append` and
+/// `append_event`.
+fn write_record(&mut self, seq: u64, ts_ns: u64, payload: &[u8]) -> Result<usize, WalError> {
+    let payload_len = payload.len();
+    let record_size = align8(RECORD_HEADER_SIZE + payload_len);
+    let end = self.cursor + record_size;
 
-        if end > self.mmap.len() {
-            return Err(WalError::CapacityExhausted {
-                capacity: self.mmap.len(),
-                needed:   end,
-            });
-        }
-
-        let crc = crc32(&payload[..payload_len]);
-        let offset = self.cursor;
-        let buf = &mut self.mmap[offset..offset + record_size];
-
-        // Write record header.
-        buf[0..8].copy_from_slice(&sc.seq.to_le_bytes());
-        buf[8..16].copy_from_slice(&sc.ts_ns.to_le_bytes());
-        buf[16..20].copy_from_slice(&(payload_len as u32).to_le_bytes());
-        buf[20..24].copy_from_slice(&crc.to_le_bytes());
-        // Write payload.
-        buf[RECORD_HEADER_SIZE..RECORD_HEADER_SIZE + payload_len]
-            .copy_from_slice(&payload[..payload_len]);
-        // Zero padding bytes.
-        for b in buf[RECORD_HEADER_SIZE + payload_len..].iter_mut() {
-            *b = 0;
-        }
-
-        if self.config.sync_on_write {
-            self.mmap.flush_range(offset, record_size)?;
-        }
-
-        self.cursor = end;
-        self.last_seq = sc.seq;
-        Ok(offset)
+    if end > self.mmap.len() {
+        return Err(WalError::CapacityExhausted {
+            capacity: self.mmap.len(),
+            needed:   end,
+        });
     }
+
+    let crc = crc32(payload);
+    let offset = self.cursor;
+    let buf = &mut self.mmap[offset..offset + record_size];
+
+    buf[0..8].copy_from_slice(&seq.to_le_bytes());
+    buf[8..16].copy_from_slice(&ts_ns.to_le_bytes());
+    buf[16..20].copy_from_slice(&(payload_len as u32).to_le_bytes());
+    buf[20..24].copy_from_slice(&crc.to_le_bytes());
+    buf[RECORD_HEADER_SIZE..RECORD_HEADER_SIZE + payload_len].copy_from_slice(payload);
+    for b in buf[RECORD_HEADER_SIZE + payload_len..].iter_mut() {
+        *b = 0;
+    }
+
+    if self.config.sync_on_write {
+        self.mmap.flush_range(offset, record_size)?;
+    }
+
+    self.cursor = end;
+    self.last_seq = seq;
+    Ok(offset)
+}
 
     /// Force an `msync` of all dirty pages regardless of `sync_on_write`.
     pub fn flush(&mut self) -> Result<(), WalError> {
@@ -241,10 +242,10 @@ impl FileWalWriter {
 
 impl WalWriter for FileWalWriter {
     type Error = WalError;
-    fn append_event(&mut self, _ev: &Event) -> Result<(), Self::Error> {
-        // In a full implementation this would serialise the Event and call
-        // the mmap append path. For now, events are logged via the
-        // SequencedCommand path; this satisfies the trait contract.
+    fn append_event(&mut self, ev: &Event) -> Result<(), Self::Error> {
+        let payload = bincode::serialize(ev)
+            .map_err(|e| WalError::Serialise(e.to_string()))?;
+        self.write_record(ev.seq().get(), now_ns(), &payload)?;
         Ok(())
     }
     fn flush(&mut self) -> Result<(), Self::Error> {
@@ -324,6 +325,16 @@ fn crc32(data: &[u8]) -> u32 {
     let mut h = Crc32Hasher::new();
     h.update(data);
     h.finalize()
+}
+
+use std::time::{SystemTime, UNIX_EPOCH};
+
+#[inline]
+fn now_ns() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0)
 }
 
 /// Round `n` up to the next multiple of 8.
