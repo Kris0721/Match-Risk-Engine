@@ -102,17 +102,17 @@ impl OrderBook {
     ///
     /// Returns `None` if the price is outside the ladder's range.
     #[inline]
-    pub fn price_to_idx(&self, price: Price) -> Option<usize> {
-        let offset = price.0 - self.tick_floor.0;
-        if offset < 0 {
-            return None;
-        }
-        let idx = offset as usize;
-        if idx >= self.bids.len() {
-            return None;
-        }
-        Some(idx)
+pub fn price_to_idx(&self, price: Price) -> Option<usize> {
+    let offset = price.0.checked_sub(self.tick_floor.0)?;
+    if offset < 0 {
+        return None;
     }
+    let idx = offset as usize;
+    if idx >= self.bids.len() {
+        return None;
+    }
+    Some(idx)
+}
 
     #[inline]
     pub fn idx_to_price(&self, idx: usize) -> Price {

@@ -137,7 +137,7 @@ fn projected_position(current: i64, side: Side, qty: Qty) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use core_types::ids::{InstrumentId, OrderId};
+    use core_types::ids::InstrumentId;
     use core_types::commands::OrderType;
 
     fn mk_order(side: Side, qty: u64, price: u64) -> NewOrder {
@@ -155,11 +155,10 @@ mod tests {
 
     #[test]
     fn rejects_when_halted() {
-        let mut state = AccountRiskState::default();
+        let state = AccountRiskState::default();
         state.set_halted(true);
         let limits = Tier0Limits::default();
         let order = mk_order(Side::Buy, 10,100);
-
         let res = check_new_order(&order, AccountId(1), &limits, &state, None);
         assert_eq!(res, Err(RiskRejectReason::AccountHalted));
     }
@@ -196,7 +195,7 @@ mod tests {
 
     #[test]
     fn rejects_position_limit() {
-        let mut state = AccountRiskState::default();
+        let state = AccountRiskState::default();
         state.set_position(95);
         let limits = Tier0Limits { max_position_abs: 100, ..Default::default() };
         let order = mk_order(Side::Buy, 10,100); // would go to 105

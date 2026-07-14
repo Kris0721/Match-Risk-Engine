@@ -31,7 +31,7 @@ use std::sync::Arc;
 #[cfg(feature = "loom")]
 use loom::sync::Arc;
 
-use std::cell::UnsafeCell;
+use std::cell::{Cell, UnsafeCell};
 use std::mem::MaybeUninit;
 
 use crate::cache_pad::CachePadded;
@@ -91,7 +91,7 @@ pub struct SpmcProducer<T, const CAP: usize> {
     // !Sync by construction: this type must not be shared across threads.
     // PhantomData<*const ()> makes the compiler infer !Sync + !Send without
     // requiring the unstable negative_impls feature.
-    _not_sync: std::marker::PhantomData<*const ()>,
+    _not_sync: std::marker::PhantomData<Cell<()>>,
 }
 
 /// One consuming end of an SPMC queue. Each `SpmcConsumer` has an independent cursor.
