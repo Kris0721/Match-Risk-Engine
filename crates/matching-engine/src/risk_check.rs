@@ -102,7 +102,7 @@ fn notional_of(price: Price, qty: Qty) -> u64 {
     if p <= 0 {
         return 0;
     }
-    let prod = p.saturating_mul(q);
+    let prod = p.saturating_mul(q) / 100_000_000;
     if prod <= 0 {
         return 0;
     }
@@ -137,19 +137,19 @@ fn projected_position(current: i64, side: Side, qty: Qty) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use core_types::ids::InstrumentId;
     use core_types::commands::OrderType;
+    use core_types::ids::InstrumentId;
 
     fn mk_order(side: Side, qty: u64, price: u64) -> NewOrder {
         NewOrder {
-             account_id: AccountId(1),
-             instrument_id: InstrumentId(1),
-             client_order_id: core_types::ClientOrderId::new(0),
-             side,
-             order_type: OrderType::Limit,
-             price: Price  ::from_raw(price as i64),
-             qty: Qty::from_raw(qty),
-             time_in_force: core_types::TimeInForce::Gtc,
+            account_id: AccountId(1),
+            instrument_id: InstrumentId(1),
+            client_order_id: core_types::ClientOrderId::new(0),
+            side,
+            order_type: OrderType::Limit,
+            price: Price::from_raw(price as i64),
+            qty: Qty::from_raw(qty),
+            time_in_force: core_types::TimeInForce::Gtc,
         }
     }
 
@@ -158,7 +158,7 @@ mod tests {
         let state = AccountRiskState::default();
         state.set_halted(true);
         let limits = Tier0Limits::default();
-        let order = mk_order(Side::Buy, 10,100);
+        let order = mk_order(Side::Buy, 10, 100);
         let res = check_new_order(&order, AccountId(1), &limits, &state, None);
         assert_eq!(res, Err(RiskRejectReason::AccountHalted));
     }
@@ -166,8 +166,11 @@ mod tests {
     #[test]
     fn rejects_qty_over_limit() {
         let state = AccountRiskState::default();
-        let limits = Tier0Limits { max_order_qty: Qty::from_raw(5), ..Default::default() };
-        let order = mk_order(Side::Buy, 10,100);
+        let limits = Tier0Limits {
+            max_order_qty: Qty::from_raw(5),
+            ..Default::default()
+        };
+        let order = mk_order(Side::Buy, 10, 100);
 
         let res = check_new_order(&order, AccountId(1), &limits, &state, None);
         assert_eq!(res, Err(RiskRejectReason::MaxOrderQtyExceeded));
@@ -176,8 +179,11 @@ mod tests {
     #[test]
     fn rejects_notional_over_limit() {
         let state = AccountRiskState::default();
-        let limits = Tier0Limits { max_order_notional: 500, ..Default::default() };
-        let order = mk_order(Side::Buy, 10, 100); // notional = 1000
+        let limits = Tier0Limits {
+            max_order_notional: 500 * 100_000_000,
+            ..Default::default()
+        };
+        let order = mk_order(Side::Buy, 10 * 100_000_000, 100 * 100_000_000); // notional = 1000
 
         let res = check_new_order(&order, AccountId(1), &limits, &state, None);
         assert_eq!(res, Err(RiskRejectReason::MaxOrderNotionalExceeded));
@@ -186,10 +192,19 @@ mod tests {
     #[test]
     fn rejects_price_out_of_band() {
         let state = AccountRiskState::default();
-        let limits = Tier0Limits { price_band_bps: 100, ..Default::default() }; // 1%
+        let limits = Tier0Limits {
+            price_band_bps: 100,
+            ..Default::default()
+        }; // 1%
         let order = mk_order(Side::Buy, 1, 110); // 10% away from 100
 
-        let res = check_new_order(&order, AccountId(1), &limits, &state, Some(Price::from_raw(100)));
+        let res = check_new_order(
+            &order,
+            AccountId(1),
+            &limits,
+            &state,
+            Some(Price::from_raw(100)),
+        );
         assert_eq!(res, Err(RiskRejectReason::PriceOutOfBand));
     }
 
@@ -197,8 +212,11 @@ mod tests {
     fn rejects_position_limit() {
         let state = AccountRiskState::default();
         state.set_position(95);
-        let limits = Tier0Limits { max_position_abs: 100, ..Default::default() };
-        let order = mk_order(Side::Buy, 10,100); // would go to 105
+        let limits = Tier0Limits {
+            max_position_abs: 100,
+            ..Default::default()
+        };
+        let order = mk_order(Side::Buy, 10, 100); // would go to 105
 
         let res = check_new_order(&order, AccountId(1), &limits, &state, None);
         assert_eq!(res, Err(RiskRejectReason::PositionLimitExceeded));
