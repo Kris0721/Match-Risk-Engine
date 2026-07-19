@@ -39,7 +39,10 @@ pub enum BookError {
     /// Cancel referred to an unknown `OrderId`.
     OrderNotFound(OrderId),
     /// Cancel referred to an order owned by a different account.
-    WrongAccount { order_id: OrderId, expected: AccountId },
+    WrongAccount {
+        order_id: OrderId,
+        expected: AccountId,
+    },
     /// Arena is at capacity — order cannot be accepted.
     ArenaFull,
 }
@@ -64,7 +67,18 @@ impl OrderBook {
                 qty,
                 order_type,
                 time_in_force,
-            } => self.apply_new_order(cmd.seq, cmd.ts_ns, account, client_order_id, symbol, side, price, qty, order_type, time_in_force),
+            } => self.apply_new_order(
+                cmd.seq,
+                cmd.ts_ns,
+                account,
+                client_order_id,
+                symbol,
+                side,
+                price,
+                qty,
+                order_type,
+                time_in_force,
+            ),
 
             InboundCommand::Cancel { account, order_id } => {
                 self.apply_cancel(cmd.seq, account, order_id)
@@ -102,11 +116,11 @@ impl OrderBook {
             events.push(EngineEvent::Rejected {
                 seq,
                 order_id,
-            account_id: account,
-            client_order_id,
-            reason: RejectReason::InvalidQty,
-        });
-        return events;
+                account_id: account,
+                client_order_id,
+                reason: RejectReason::InvalidQty,
+            });
+            return events;
         }
 
         let Some(price_idx) = self.price_to_idx(price) else {
@@ -128,8 +142,17 @@ impl OrderBook {
         // ── Match against the opposite side ───────────────────────────────
         let mut qty_remaining = qty;
 
-        qty_remaining =
-            self.match_against_book(seq, ts_ns, symbol, side, price, qty_remaining, order_id, account, &mut events);
+        qty_remaining = self.match_against_book(
+            seq,
+            ts_ns,
+            symbol,
+            side,
+            price,
+            qty_remaining,
+            order_id,
+            account,
+            &mut events,
+        );
 
         if qty_remaining.0 == 0 {
             // Fully filled — no resting order to add.
@@ -153,7 +176,7 @@ impl OrderBook {
                 });
             }
             if qty_remaining.0 < qty.0 {
-                events.push(EngineEvent::Cancelled { seq, order_id});
+                events.push(EngineEvent::Cancelled { seq, order_id });
             }
             events.push(self.book_top_event(seq, symbol));
             return events;
@@ -178,7 +201,7 @@ impl OrderBook {
 
         // Link into the price level FIFO.
         let level_slot = match side {
-            Side::Buy  => &mut self.bids[price_idx],
+            Side::Buy => &mut self.bids[price_idx],
             Side::Sell => &mut self.asks[price_idx],
         };
         let pl = level_slot.get_or_insert_with(|| crate::level::PriceLevel::new(price));
@@ -186,11 +209,21 @@ impl OrderBook {
 
         // Update best-bid / best-ask.
         match side {
-            Side::Buy  => self.refresh_best_bid_up(price_idx),
+            Side::Buy => self.refresh_best_bid_up(price_idx),
             Side::Sell => self.refresh_best_ask_down(price_idx),
         }
 
-        events.push(EngineEvent::Accepted { seq, order_id, ts_ns, symbol, account_id: account, client_order_id, side, price, qty: qty_remaining });
+        events.push(EngineEvent::Accepted {
+            seq,
+            order_id,
+            ts_ns,
+            symbol,
+            account_id: account,
+            client_order_id,
+            side,
+            price,
+            qty: qty_remaining,
+        });
         events.push(self.book_top_event(seq, symbol));
         events
     }
@@ -257,6 +290,26 @@ impl OrderBook {
                 let maker = &self.arena[maker_key];
                 (maker.id, maker.account, maker.price)
             };
+
+            // ── Self-trade prevention ──────────────────────────────────
+            // Same account on both sides: cancel the resting (maker) order
+            // instead of matching against it, then keep trying to fill the
+            // incoming order against whatever's next in the book. This is the
+            // only STP policy implemented — "cancel incoming" / "reject both"
+            // are not, and are not silently approximated by this branch.
+            if maker_account == aggressor_account {
+                if let Some(cancelled_id) = self.cancel_resting_head(maker_side, best_idx) {
+                    self.id_to_key.remove(&cancelled_id);
+                    events.push(EngineEvent::Cancelled {
+                        seq,
+                        order_id: cancelled_id,
+                    });
+                }
+                if self.is_level_empty(maker_side, best_idx) {
+                    self.clear_empty_best(maker_side, best_idx);
+                }
+                continue;
+            }
 
             let maker_qty = self.arena[maker_key].qty_remaining;
             let fill_qty = if qty_remaining.0 < maker_qty.0 {
@@ -348,7 +401,7 @@ impl OrderBook {
         };
 
         let ladder = match side {
-            Side::Buy  => &mut self.bids,
+            Side::Buy => &mut self.bids,
             Side::Sell => &mut self.asks,
         };
 
@@ -358,7 +411,7 @@ impl OrderBook {
                 // Don't reallocate — just leave the slot; the best-pointer
                 // scan will skip it.
                 match side {
-                    Side::Buy  => {
+                    Side::Buy => {
                         if self.best_bid_idx == Some(price_idx) {
                             self.scan_best_bid_down();
                         }
@@ -389,7 +442,7 @@ impl OrderBook {
 
     fn get_level_mut(&mut self, side: Side, idx: usize) -> Option<&mut crate::level::PriceLevel> {
         match side {
-            Side::Buy  => self.bids[idx].as_mut(),
+            Side::Buy => self.bids[idx].as_mut(),
             Side::Sell => self.asks[idx].as_mut(),
         }
     }
@@ -398,7 +451,7 @@ impl OrderBook {
     /// Returns `true` if the head order was fully filled.
     fn fill_level_head(&mut self, side: Side, idx: usize, fill_qty: Qty) -> bool {
         let level = match side {
-            Side::Buy  => self.bids[idx].as_mut(),
+            Side::Buy => self.bids[idx].as_mut(),
             Side::Sell => self.asks[idx].as_mut(),
         };
         match level {
@@ -407,9 +460,23 @@ impl OrderBook {
         }
     }
 
+    /// Remove the resting head order at `side`/`idx` without filling it.
+    /// Used by self-trade prevention to cancel a resting order that would
+    /// otherwise cross with the same account's incoming order. Returns
+    /// the cancelled order's id, or `None` if the level was empty.
+    fn cancel_resting_head(&mut self, side: Side, idx: usize) -> Option<OrderId> {
+        let level = match side {
+            Side::Buy => self.bids[idx].as_mut(),
+            Side::Sell => self.asks[idx].as_mut(),
+        }?;
+        let head_key = level.peek_head()?;
+        let removed = level.remove(head_key, &mut self.arena)?;
+        Some(removed.id)
+    }
+
     fn is_level_empty(&self, side: Side, idx: usize) -> bool {
         let level = match side {
-            Side::Buy  => &self.bids[idx],
+            Side::Buy => &self.bids[idx],
             Side::Sell => &self.asks[idx],
         };
         level.as_ref().map(|l| l.is_empty()).unwrap_or(true)

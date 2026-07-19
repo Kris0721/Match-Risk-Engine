@@ -41,9 +41,23 @@ impl RefBook {
 
     fn apply(&mut self, cmd: &SequencedCommand) -> u64 {
         match &cmd.cmd {
-            InboundCommand::NewOrder { side, price, qty, account, order_type, time_in_force, .. } => {
-                self.ref_new_order(cmd.seq, *side, *price, *qty, *account, *order_type, *time_in_force )
-            }
+            InboundCommand::NewOrder {
+                side,
+                price,
+                qty,
+                account,
+                order_type,
+                time_in_force,
+                ..
+            } => self.ref_new_order(
+                cmd.seq,
+                *side,
+                *price,
+                *qty,
+                *account,
+                *order_type,
+                *time_in_force,
+            ),
             InboundCommand::Cancel { account, order_id } => {
                 self.ref_cancel(*order_id, *account);
                 0
@@ -104,11 +118,22 @@ impl RefBook {
             }
 
             let key = maker_key.unwrap();
-            let (maker_opposite, maker_map) = match side {
-                Side::Buy  => (Side::Sell, &mut self.asks),
-                Side::Sell => (Side::Buy, &mut self.bids),
+            let maker_map = match side {
+                Side::Buy => &mut self.asks,
+                Side::Sell => &mut self.bids,
             };
             let entry = maker_map.get_mut(&key).unwrap();
+
+            // Self-trade prevention: mirror `OrderBook`'s `CancelResting` policy —
+            // cancel the resting order from the same account instead of matching
+            // against it, then keep trying to fill against whatever's next.
+            if entry.1 == account {
+                let maker_oid = entry.0;
+                maker_map.remove(&key);
+                self.index.remove(&maker_oid);
+                continue;
+            }
+
             let fill = qty_rem.min(entry.2 .0);
             entry.2 = Qty(entry.2 .0 - fill);
             qty_rem -= fill;
@@ -122,11 +147,15 @@ impl RefBook {
         }
 
         // Rest remainder for Limit orders.
-        if qty_rem > 0 && order_type == OrderType::Limit && time_in_force == TimeInForce::Gtc  {
+        if qty_rem > 0 && order_type == OrderType::Limit && time_in_force == TimeInForce::Gtc {
             let k = (price.0, seq);
             match side {
-                Side::Buy  => { self.bids.insert(k, (order_id, account, Qty(qty_rem))); }
-                Side::Sell => { self.asks.insert(k, (order_id, account, Qty(qty_rem))); }
+                Side::Buy => {
+                    self.bids.insert(k, (order_id, account, Qty(qty_rem)));
+                }
+                Side::Sell => {
+                    self.asks.insert(k, (order_id, account, Qty(qty_rem)));
+                }
             }
             self.index.insert(order_id, (side, k));
         }
@@ -137,8 +166,12 @@ impl RefBook {
     fn ref_cancel(&mut self, order_id: OrderId, _account: AccountId) {
         if let Some((side, key)) = self.index.remove(&order_id) {
             match side {
-                Side::Buy  => { self.bids.remove(&key); }
-                Side::Sell => { self.asks.remove(&key); }
+                Side::Buy => {
+                    self.bids.remove(&key);
+                }
+                Side::Sell => {
+                    self.asks.remove(&key);
+                }
             }
         }
     }
@@ -171,7 +204,11 @@ fn gen_commands(rng: &mut StdRng, n: usize) -> Vec<SequencedCommand> {
 
         let cmd = if action < 2 || live_orders.is_empty() {
             // New order (weight 2/4 or when no live orders to cancel)
-            let side = if rng.gen_bool(0.5) { Side::Buy } else { Side::Sell };
+            let side = if rng.gen_bool(0.5) {
+                Side::Buy
+            } else {
+                Side::Sell
+            };
             let price = Price(TICK_FLOOR + rng.gen_range(0..(NUM_TICKS as i64)));
             let qty = Qty(rng.gen_range(1..=20));
             let (order_type, tif) = if rng.gen_bool(0.2) {
@@ -200,7 +237,11 @@ fn gen_commands(rng: &mut StdRng, n: usize) -> Vec<SequencedCommand> {
             }
         };
 
-        cmds.push(SequencedCommand { seq, ts_ns: seq * 1000, cmd });
+        cmds.push(SequencedCommand {
+            seq,
+            ts_ns: seq * 1000,
+            cmd,
+        });
     }
     cmds
 }
@@ -232,11 +273,9 @@ fn run_one_trial(seed: u64, n_cmds: usize) {
         let ref_filled = reference.apply(cmd);
 
         assert_eq!(
-            book_filled,
-            ref_filled,
+            book_filled, ref_filled,
             "seed={seed} seq={} book_filled={book_filled} ref_filled={ref_filled}\ncmd={:?}",
-            cmd.seq,
-            cmd.cmd,
+            cmd.seq, cmd.cmd,
         );
     }
 }
@@ -261,4 +300,3 @@ fn differential_fuzz_soak() {
         run_one_trial(seed, 2_000);
     }
 }
-
