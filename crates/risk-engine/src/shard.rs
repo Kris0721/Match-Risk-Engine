@@ -15,16 +15,17 @@
 
 use std::collections::HashMap;
 use std::ops::Range;
+use std::sync::Arc;
 
-use core_types::{AccountId, EngineEvent, InboundCommand, Price, Symbol, OrderId};
+use core_types::{AccountId, EngineEvent, InboundCommand, OrderId, Price, Symbol};
 use ring_buffer::{SpmcConsumer, SpscProducer};
-use seqlock::AccountRiskState;
+use seqlock::AccountRiskTable;
 
 use crate::config::ShardConfig;
 use crate::position::Position;
 
 const FANOUT_CAP: usize = 1 << 14; // 16 384 — must match the producer side
-const CMD_CAP:    usize = 1 << 10; // 1 024
+const CMD_CAP: usize = 1 << 10; // 1 024
 
 /// Mark prices fed to the shard for margin recomputation.
 /// In production these come from a market-data feed; here we pass them in
@@ -39,16 +40,15 @@ pub struct RiskShard {
     pub positions: HashMap<(AccountId, Symbol), Position>,
     /// Seqlock states for each account this shard owns.
     /// Indexed by `account_id - owned.start`.
-    pub states: Vec<AccountRiskState>,
+    pub states: Arc<AccountRiskTable>,
     initial_deposits: Vec<i64>,
     /// Config / limits.
     pub config: ShardConfig,
 }
 
 impl RiskShard {
-    pub fn new(owned: Range<u64>, config: ShardConfig) -> Self {
+    pub fn new(owned: Range<u64>, config: ShardConfig, states: Arc<AccountRiskTable>) -> Self {
         let n = (owned.end - owned.start) as usize;
-        let states = (0..n).map(|_| AccountRiskState::default()).collect();
         Self {
             owned,
             positions: HashMap::new(),
@@ -62,10 +62,18 @@ impl RiskShard {
     /// state. Call this once per account at shard startup (deposits/withdrawals
     /// after that would need a similar dedicated method — not implemented here).
     pub fn seed_deposit(&mut self, account: AccountId, amount: i64) {
-        let idx = self.state_idx(account);
-        self.initial_deposits[idx] = amount;
-        let s = self.states[idx].read();
-        self.states[idx].update(amount, 0, s.frozen, s.halted, s.position, s.open_order_count);
+        let local = self.local_idx(account);
+        self.initial_deposits[local] = amount;
+        let state = self.states.get(account.0);
+        let s = state.read();
+        state.update(
+            amount,
+            0,
+            s.frozen,
+            s.halted,
+            s.position,
+            s.open_order_count,
+        );
     }
 
     /// Returns `true` if this shard owns `account`.
@@ -76,7 +84,7 @@ impl RiskShard {
 
     /// Index into `self.states` for a given `AccountId`.
     #[inline]
-    fn state_idx(&self, account: AccountId) -> usize {
+    fn local_idx(&self, account: AccountId) -> usize {
         (account.0 - self.owned.start) as usize
     }
 
@@ -110,20 +118,23 @@ impl RiskShard {
                     }
 
                     // Update position.
-                    let pos = self
-                        .positions
-                        .entry((acct, symbol))
-                        .or_default();
+                    let pos = self.positions.entry((acct, symbol)).or_default();
                     pos.apply_fill(side, price, qty);
 
                     // Recompute margin across all symbols for this account.
-                    let (balance, used_margin) =
-                        self.recompute_margin(acct, mark_prices);
+                    let (balance, used_margin) = self.recompute_margin(acct, mark_prices);
 
                     // Publish updated state via seqlock.
-                    let idx = self.state_idx(acct);
-                    let s = self.states[idx].read();
-                    self.states[idx].update(balance, used_margin, s.frozen, s.halted, s.position, s.open_order_count);
+                    let state = self.states.get(acct.0);
+                    let s = state.read();
+                    state.update(
+                        balance,
+                        used_margin,
+                        s.frozen,
+                        s.halted,
+                        s.position,
+                        s.open_order_count,
+                    );
 
                     // Trigger liquidation if maintenance margin breached.
                     if used_margin > balance {
@@ -132,14 +143,21 @@ impl RiskShard {
                             symbol,
                         });
                         // Freeze the account immediately so no new orders slip through.
-                        let s2 = self.states[idx].read();
-                        self.states[idx].update(balance, used_margin, true, s2.halted, s2.position, s2.open_order_count);
+                        let s2 = state.read();
+                        state.update(
+                            balance,
+                            used_margin,
+                            true,
+                            s2.halted,
+                            s2.position,
+                            s2.open_order_count,
+                        );
                     }
                 }
 
                 liquidate_cmds
             }
-            
+
             EngineEvent::OrderCancelled { account_id, .. }
             | EngineEvent::OrderRejected { account_id, .. } => {
                 // No position change; nothing to do for the risk shard.
@@ -154,7 +172,7 @@ impl RiskShard {
                 eprintln!("[risk-shard {:?}] snapshot at seq={}", self.owned, seq);
                 Vec::new()
             }
-            _ => Vec::new()
+            _ => Vec::new(),
         }
     }
 
@@ -165,16 +183,16 @@ impl RiskShard {
     ///
     /// This is intentionally simplified — a real system would also track
     /// funding payments, fees, deposits/withdrawals, etc.
-    
+
     fn recompute_margin(&self, account: AccountId, mark_prices: &MarkPrices) -> (i64, i64) {
         let limits = &self.config.limits;
-        let idx = self.state_idx(account);
+        let idx = self.local_idx(account);
         // Always start from the fixed deposit, never from a previously-published
         // balance — that value already had this account's cumulative realised_pnl
         // folded in last time this function ran, so reading it back here would
         // double-count every fill's PnL on every subsequent recompute.
         let mut balance = self.initial_deposits[idx];
-        let mut used_margin: i64 = 0;    
+        let mut used_margin: i64 = 0;
 
         for ((acct, symbol), pos) in &self.positions {
             if *acct != account {
@@ -195,9 +213,8 @@ impl RiskShard {
 
             let notional = pos.notional(mark);
 
-            let margin_required = notional
-                .saturating_mul(limits.maintenance_margin_fraction)
-                / 1_000_000;
+            let margin_required =
+                notional.saturating_mul(limits.maintenance_margin_fraction) / 1_000_000;
 
             used_margin = used_margin.saturating_add(margin_required);
         }
@@ -239,11 +256,12 @@ pub fn run_risk_shard(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use core_types::{EngineEvent, Price, Qty, Side, Symbol, AccountId};
+    use core_types::{AccountId, EngineEvent, Price, Qty, Side, Symbol};
 
     fn make_shard(n_accounts: usize) -> RiskShard {
         let config = ShardConfig::new(n_accounts);
-        let mut shard = RiskShard::new(0..n_accounts as u64, config);
+        let states = Arc::new(AccountRiskTable::new(n_accounts));
+        let mut shard = RiskShard::new(0..n_accounts as u64, config, states);
         // Seed each account with 10,000 USD deposit (1e8 scale).
         for i in 0..n_accounts {
             shard.seed_deposit(AccountId(i as u64), 10_000_00000000);
@@ -264,7 +282,7 @@ mod tests {
             maker_acct: maker,
             taker_acct: taker,
             maker_side: Side::Buy,
-            symbol, 
+            symbol,
             price,
             qty,
             maker_order: OrderId(0),
@@ -302,9 +320,13 @@ mod tests {
     fn liquidation_triggered_on_margin_breach() {
         let n = 1;
         let config = ShardConfig::new(n);
-        let mut shard = RiskShard::new(0..1, config);
+        let states = Arc::new(AccountRiskTable::new(n));
+        let mut shard = RiskShard::new(0..1, config, states);
         // Give account 0 a tiny balance: 1 USD (1e8 scale).
-        shard.states[0].update(1_00000000, 0, false, false, 0, 0);
+        shard
+            .states
+            .get(0)
+            .update(1_00000000, 0, false, false, 0, 0);
 
         let marks = HashMap::new();
 
@@ -320,11 +342,17 @@ mod tests {
 
         let result = shard.process_event(ev, &marks);
         assert!(
-            result.iter().any(|cmd| matches!(cmd, InboundCommand::Liquidate { account: AccountId(0), .. })),
+            result.iter().any(|cmd| matches!(
+                cmd,
+                InboundCommand::Liquidate {
+                    account: AccountId(0),
+                    ..
+                }
+            )),
             "expected liquidation command"
         );
         // Account should be frozen after breach.
-        let snap = shard.states[0].read();
+        let snap = shard.states.get(0).read();
         assert!(snap.frozen);
     }
 }

@@ -23,22 +23,24 @@
 //! real system.
 
 use std::collections::{HashMap, VecDeque};
+use std::sync::Arc;
 
-use core_types::{
-    AccountId, EngineEvent, InboundCommand,
-    Price, SequencedCommand, Symbol,
-};
-use order_book::{OrderBook, book::BookConfig};
-use risk_engine::{RiskShard, ShardConfig, MarkPrices};
-use seqlock::AccountRiskState;
+use core_types::{AccountId, EngineEvent, InboundCommand, Price, SequencedCommand, Symbol};
+use order_book::{book::BookConfig, OrderBook};
+use risk_engine::{MarkPrices, RiskShard, ShardConfig};
+use seqlock::AccountRiskTable;
 
 /// A deterministic clock: just a counter incremented once per harness tick.
 #[derive(Default, Clone, Copy, Debug)]
 pub struct SimClock(pub u64);
 
 impl SimClock {
-    pub fn now_ns(&self) -> u64 { self.0 * 1_000 } // 1 µs per tick
-    pub fn tick(&mut self) { self.0 += 1; }
+    pub fn now_ns(&self) -> u64 {
+        self.0 * 1_000
+    } // 1 µs per tick
+    pub fn tick(&mut self) {
+        self.0 += 1;
+    }
 }
 
 /// Configuration for a single simulation run.
@@ -63,13 +65,13 @@ pub struct SimConfig {
 impl Default for SimConfig {
     fn default() -> Self {
         Self {
-            n_symbols:         2,
-            n_accounts:        4,
-            n_risk_shards:     2,
-            initial_balance:   100_000_00000000, // 100,000 USD
+            n_symbols: 2,
+            n_accounts: 4,
+            n_risk_shards: 2,
+            initial_balance: 100_000_00000000, // 100,000 USD
             snapshot_interval: 1_000,
-            book_tick_floor:   Price::ZERO,
-            book_num_ticks:    1024,
+            book_tick_floor: Price::ZERO,
+            book_num_ticks: 1024,
         }
     }
 }
@@ -78,23 +80,23 @@ impl Default for SimConfig {
 #[derive(Default, Debug)]
 pub struct SimResult {
     /// All engine events emitted in order.
-    pub events:            Vec<EngineEvent>,
+    pub events: Vec<EngineEvent>,
     /// Total commands sequenced.
     pub commands_sequenced: u64,
     /// Total trades matched.
-    pub trades_matched:     u64,
+    pub trades_matched: u64,
     /// Total liquidations triggered.
-    pub liquidations:       u64,
+    pub liquidations: u64,
     /// Snapshots taken.
-    pub snapshots:          u64,
+    pub snapshots: u64,
 }
 
 /// Simulated per-symbol matching engine state.
 struct SimEngine {
-    book:   OrderBook,
+    book: OrderBook,
     symbol: Symbol,
 }
- 
+
 impl SimEngine {
     fn new(symbol: Symbol, tick_floor: Price, num_ticks: usize) -> Self {
         let cfg = BookConfig {
@@ -103,7 +105,10 @@ impl SimEngine {
             num_ticks,
             arena_capacity: 4096,
         };
-        Self { book: OrderBook::new(cfg), symbol }
+        Self {
+            book: OrderBook::new(cfg),
+            symbol,
+        }
     }
 
     /// Process one `SequencedCommand` and return any emitted events.
@@ -129,31 +134,31 @@ impl SimEngine {
 
 /// The top-level simulation harness.
 pub struct SimHarness {
-    pub config:  SimConfig,
-    pub clock:   SimClock,
+    pub config: SimConfig,
+    pub clock: SimClock,
 
     // --- Sequencer state ---
-    next_seq:    u64,
+    next_seq: u64,
     /// Commands waiting to be sequenced (arrive from the test / scenario).
-    inbound:     VecDeque<InboundCommand>,
+    inbound: VecDeque<InboundCommand>,
     /// Sequenced commands routed to each matching engine.
-    me_queues:   Vec<VecDeque<SequencedCommand>>,
+    me_queues: Vec<VecDeque<SequencedCommand>>,
     /// WAL log of every sequenced command (in-memory for the sim).
-    pub wal:     Vec<SequencedCommand>,
+    pub wal: Vec<SequencedCommand>,
 
     // --- Matching engines (one per symbol) ---
-    engines:     Vec<SimEngine>,
+    engines: Vec<SimEngine>,
     /// Events emitted by matching engines, waiting to be consumed by
     /// risk shards and other subscribers.
     event_queue: VecDeque<EngineEvent>,
 
     // --- Risk shards ---
-    shards:      Vec<RiskShard>,
+    shards: Vec<RiskShard>,
     mark_prices: MarkPrices,
 
     // --- Account risk states (shared via seqlock in production) ---
     /// In the sim these live here for easy inspection.
-    pub account_states: Vec<AccountRiskState>,
+    pub account_states: Arc<AccountRiskTable>,
 
     /// Snapshot interval (in sequenced commands).
     snapshot_interval: u64,
@@ -168,21 +173,26 @@ impl SimHarness {
         );
 
         let engines: Vec<SimEngine> = (0..config.n_symbols)
-            .map(|i| SimEngine::new(Symbol(i as u16), config.book_tick_floor, config.book_num_ticks))
+            .map(|i| {
+                SimEngine::new(
+                    Symbol(i as u16),
+                    config.book_tick_floor,
+                    config.book_num_ticks,
+                )
+            })
             .collect();
 
-        let me_queues = (0..config.n_symbols)
-            .map(|_| VecDeque::new())
-            .collect();
+        let me_queues = (0..config.n_symbols).map(|_| VecDeque::new()).collect();
+
+        let account_states = Arc::new(AccountRiskTable::new(config.n_accounts));
 
         let accounts_per_shard = config.n_accounts / config.n_risk_shards;
         let shards: Vec<RiskShard> = (0..config.n_risk_shards)
             .map(|i| {
                 let start = (i * accounts_per_shard) as u64;
-                let end   = start + accounts_per_shard as u64;
+                let end = start + accounts_per_shard as u64;
                 let shard_config = ShardConfig::new(accounts_per_shard);
-                let mut shard = RiskShard::new(start..end, shard_config);
-                // Seed every account with the initial balance.
+                let mut shard = RiskShard::new(start..end, shard_config, account_states.clone());
                 for account_id in start..end {
                     shard.seed_deposit(AccountId(account_id), config.initial_balance);
                 }
@@ -190,25 +200,16 @@ impl SimHarness {
             })
             .collect();
 
-        // Flat account state array for inspection (mirrors each shard's states).
-        let account_states: Vec<AccountRiskState> = (0..config.n_accounts)
-            .map(|_| {
-                let s = AccountRiskState::new();
-                s.update(config.initial_balance, 0, false, false, 0, 0);
-                s
-            })
-            .collect();
-
         Self {
-            clock:             SimClock::default(),
-            next_seq:          0,
-            inbound:           VecDeque::new(),
+            clock: SimClock::default(),
+            next_seq: 0,
+            inbound: VecDeque::new(),
             me_queues,
-            wal:               Vec::new(),
+            wal: Vec::new(),
             engines,
-            event_queue:       VecDeque::new(),
+            event_queue: VecDeque::new(),
             shards,
-            mark_prices:       HashMap::new(),
+            mark_prices: HashMap::new(),
             account_states,
             snapshot_interval: config.snapshot_interval,
             config,
@@ -239,7 +240,11 @@ impl SimHarness {
                 let seq = self.next_seq;
                 let ts_ns = self.clock.now_ns();
 
-                let sequenced = SequencedCommand { seq, ts_ns, cmd: cmd.clone() };
+                let sequenced = SequencedCommand {
+                    seq,
+                    ts_ns,
+                    cmd: cmd.clone(),
+                };
                 self.wal.push(sequenced.clone());
                 result.commands_sequenced += 1;
 
@@ -249,8 +254,7 @@ impl SimHarness {
                     | InboundCommand::Liquidate { symbol, .. } => {
                         self.me_queues[symbol.0 as usize].push_back(sequenced);
                     }
-                    InboundCommand::Cancel { .. }
-                    | InboundCommand::FreezeAccount { .. } => {
+                    InboundCommand::Cancel { .. } | InboundCommand::FreezeAccount { .. } => {
                         // Broadcast to all ME queues.
                         for q in self.me_queues.iter_mut() {
                             q.push_back(sequenced.clone());
@@ -290,34 +294,15 @@ impl SimHarness {
                         self.inbound.push_front(liquidate_cmd);
                     }
                 }
-
-                // Sync the flat account_states for test inspection.
-                self.sync_account_states();
             }
         }
 
         result
     }
 
-    /// Copy seqlock state from each shard into the flat `account_states` vec
-    /// so tests can inspect any account without knowing which shard owns it.
-    fn sync_account_states(&mut self) {
-        for shard in &self.shards {
-            for (local_idx, state) in shard.states.iter().enumerate() {
-                let global_idx = shard.owned.start as usize + local_idx;
-                let snap = state.read();
-                self.account_states[global_idx]
-                    .update(snap.balance, snap.used_margin, snap.frozen, snap.halted, snap.position, snap.open_order_count);
-            }
-        }
-    }
-
     /// Convenience: read the risk snapshot for one account.
-    pub fn account_snapshot(
-        &self,
-        account: AccountId,
-    ) -> seqlock::AccountRiskSnapshot {
-        self.account_states[account.0 as usize].read()
+    pub fn account_snapshot(&self, account: AccountId) -> seqlock::AccountRiskSnapshot {
+        self.account_states.get(account.0).read()
     }
 
     /// Drain and return all events emitted so far.

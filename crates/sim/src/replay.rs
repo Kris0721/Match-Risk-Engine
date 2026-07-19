@@ -50,8 +50,8 @@ impl Replayer {
         let (_, replayed) = self.replay(log);
 
         for i in 0..self.config.n_accounts {
-            let orig = original.account_states[i].read();
-            let rep  = replayed.account_states[i].read();
+            let orig = original.account_states.get(i as u64).read();
+            let rep = replayed.account_states.get(i as u64).read();
 
             if orig.balance != rep.balance {
                 return Err(format!(
@@ -85,8 +85,7 @@ impl Replayer {
         if original_result.trades_matched != replayed_result.trades_matched {
             return Err(format!(
                 "trade count mismatch: orig={} replay={}",
-                original_result.trades_matched,
-                replayed_result.trades_matched,
+                original_result.trades_matched, replayed_result.trades_matched,
             ));
         }
         Ok(())
