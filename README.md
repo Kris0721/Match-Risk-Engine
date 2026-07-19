@@ -1,255 +1,257 @@
 # Match-Risk-Engine
 
-> **Lock-free, exchange-grade matching & risk engine in Rust**  
-> `p50 ~400ns · p99 ~680ns · p99.9 < 1.2µs · 2–5M orders/sec/core · Zero kernel calls on hot path`
+> **Contention-free matching & risk engine in Rust**
+> Single-owner sharding · SPSC/SPMC ring buffers · Seqlock risk state · Array price ladder · mmap WAL
 
 ---
 
 ## What This Is
 
-A production-grade, ultra-low-latency order matching and risk engine built from first principles in Rust. No Tokio worker pool. No mutexes. No heap allocation after warm-up. No kernel involvement on the critical path.
+A low-latency order matching and risk engine built from scratch in Rust. The core architecture is **contention-free by construction**: each piece of mutable state has exactly one owner thread, enforced at compile time via Rust's `!Sync`. No mutexes anywhere. Communication between threads uses hand-rolled SPSC/SPMC ring buffers with only `Acquire`/`Release` atomics.
 
-The architecture is governed by five inviolable laws:
-
-| Law | Rule |
-|-----|------|
-| L1 — No Kernel | Zero syscalls between NIC receive and fill publish |
-| L2 — No Contention | Only one thread ever writes any piece of mutable state |
-| L3 — No Allocation | Zero heap allocation after engine warm-up |
-| L4 — No Context Switch | Thread-per-core; hot cores never touched by OS scheduler |
-| L5 — No Page Cache WAL | PMEM or capacitor-backed NVMe via `O_DIRECT` only |
+This is an active work-in-progress. The matching and risk core is functional; the networking layer, WAL durability, and end-to-end integration are at varying levels of completeness. See [Project Status](#project-status) and [Roadmap](#roadmap) for details.
 
 ---
 
-## Performance Targets
+## Project Status
 
-| Metric | Target | Mechanism |
-|--------|--------|-----------|
-| p50 exchange-internal latency | ~400ns | Array ladder + SPSC + PMEM WAL |
-| p99 exchange-internal latency | ~680ns | Thread-per-core, no scheduler jitter |
-| p99.9 exchange-internal latency | < 1.2µs | Kernel bypass + zero CAS on hot path |
-| Orders/sec per ME core | 2–5M | SPSC push from Sequencer |
-| Total orders/sec (8 ME cores) | 16–40M | Sequencer fan-out throughput |
-| Hot-path heap allocations | **Zero** | Pre-sized SlotMap arena |
-| Hot-path syscalls | **Zero** | DPDK NIC bypass + PMEM WAL |
-| Hot-path CAS operations | **Zero** | Single-owner sharding |
-| WAL write latency | ~300ns | `clwb` + `sfence` — CPU instructions only |
-| Sequencer failover | < 15ms | Hot-standby + single CAS leader election |
-| Order loss on crash | **Zero** | WAL written before fan-out; idempotent replay |
+| Component | Status | Notes |
+|-----------|--------|-------|
+| SPSC ring buffer | ✅ Implemented | Hand-rolled, loom-tested, CachePadded cursors |
+| SPMC ring buffer (broadcast) | ✅ Implemented | Fan-out to risk shards, WAL, metrics |
+| Seqlock (AccountRiskState) | ✅ Implemented | SWMR, loom-tested |
+| Order book (array ladder) | ✅ Implemented | Price-time priority, SlotMap arena, zero-alloc steady state |
+| Matching engine loop | ✅ Implemented | Per-symbol thread, SPSC-driven, SmallVec event output |
+| Sequencer | ✅ Implemented | Global ordering, round-robin gateway polling, WAL write, symbol routing |
+| Risk engine (Tier-1 shard) | ✅ Implemented | Per-account-range position tracking, margin recomputation, liquidation |
+| Tier-0 risk check | ✅ Implemented | Gateway-side, seqlock read, allocation-free |
+| WAL writer | ✅ Implemented | mmap + msync, CRC32 integrity, bincode serialisation |
+| WAL recovery | ✅ Implemented | Scan + replay from snapshot point, corrupt-tail detection |
+| Snapshots | ✅ Implemented | Bincode-serialised shard state, sequence-stamped |
+| Gateway (TCP) | ✅ Implemented | Tokio-based, binary codec, session management, market data subscriptions |
+| Differential fuzz tests | ✅ Implemented | Reference `BTreeMap` matcher vs array book — randomised, deterministic seeds |
+| Simulation harness | ✅ Implemented | Deterministic replay, chaos testing scaffolding |
+| Dual-engine redundancy | 🔨 In progress | Second engine + sorter for dual-write architecture |
+| Metrics aggregator | 🔨 In progress | CachePadded counters, latency histograms |
+| FOK order support | ❌ Not implemented | Enum variant exists but matching logic doesn't handle it |
+| Market order support | ❌ Not implemented | OrderType::Market is parsed but ignored in matching |
+| Self-trade prevention | ❌ Not implemented | No STP policy; accounts can match against themselves |
+| DPDK kernel-bypass networking | ❌ Not implemented | Gateway uses standard Tokio TCP |
+| PMEM WAL (`clwb`/`sfence`) | ❌ Not implemented | WAL uses mmap + msync |
+| Sequencer standby / failover | ❌ Not implemented | No hot-standby or leader election |
+| Benchmarks | ❌ Not implemented | No criterion or latency measurement harness |
 
 ---
 
-## Core Thesis: Contention-Free by Construction
+## Design Principles
 
-"Lock-free" (CAS loops, hazard pointers) is the wrong target — CAS still causes retry storms under peak load. This engine is **contention-free by construction**: each piece of mutable state has exactly one owner thread, enforced at compile time by Rust's `!Sync`.
+The architecture is built around **eliminating contention at the design level** rather than managing it with lock-free data structures. CAS-based "lock-free" algorithms still cause retry storms under peak load. This engine avoids that entirely:
 
-| Synchronization Tier | Mechanism | Where Used | Cost |
+| Synchronisation Tier | Mechanism | Where Used | Cost |
 |----------------------|-----------|------------|------|
-| None | Single-threaded ownership (`!Sync`) | OrderBook, account states, seq counter | 0ns |
-| SPSC/SPMC | Acquire/Release on cursor only | Gateway→Seq, Seq→ME, ME fan-out | ~10–20ns |
-| Seqlock (SWMR) | Single writer stamps seq; readers retry only on mid-write | AccountRiskState reads | ~5–10ns |
-| CAS | `compare_exchange(SeqCst)` | Leader election **only** — once per failover | Irrelevant |
+| None | Single-threaded ownership (`!Sync`) | OrderBook, seq counter, position map | 0 |
+| SPSC/SPMC | Acquire/Release on cursor only | Gateway→Seq, Seq→ME, ME→risk shard | ~10–20ns |
+| Seqlock (SWMR) | Single writer stamps seq; readers retry on mid-write | AccountRiskState reads | ~5–10ns |
 
 ---
 
-## System Architecture
+## Architecture
 
 ```
-NUMA NODE 0 — Hot Path (all latency-critical threads)
-═══════════════════════════════════════════════════════
-Core 1  ── Gateway       (DPDK rx/tx, zero-copy parse, Tier-0 risk)
-                              SPSC push ↓
-Core 2  ── Sequencer PRIMARY  (plain u64 counter, PMEM WAL ~300ns)
-                              SPSC fan-out ↓↓↓↓
-Core 4  ── ME[BTC/USDT] ─┐
-Core 5  ── ME[ETH/USDT]  │  Each: array price ladder (L1/L2 resident)
-Core 6  ── ME[SOL/USDT]  │        SlotMap order arena (zero alloc)
-Core 7  ── ME[BNB/USDT] ─┘        SPMC fan-out to consumers below
-Core 3  ── Sequencer STANDBY  (hot mirror, promotes in <15ms)
-
-NUMA NODE 1 — Warm Path (risk, WAL, market data)
-═══════════════════════════════════════════════════════
-Core 8  ── Risk Shard 0   (accounts 0..N/2)
-Core 9  ── Risk Shard 1   (accounts N/2..N)
-Core 10 ── WAL Writer     (PMEM append)
-Core 11 ── Market Data    (UDP multicast)
-Core 12 ── Metrics        (CachePadded AtomicU64 Relaxed)
-Core 13 ── Snapshot       (rkyv zero-copy)
-Core 14 ── Monitor        (heartbeat watchdog)
-Core 0  ── OS / IRQ / everything else (NOT isolated)
+Gateway threads (Tokio TCP)
+    │
+    │  SPSC push (InboundCommand)
+    ▼
+Sequencer (pinned thread)
+    │  assigns global seq + timestamp
+    │  writes to WAL (mmap, best-effort)
+    │  routes by symbol
+    │
+    ├── SPSC push ──▶  ME[symbol 0]  ──▶ SPMC fan-out ──▶ Risk Shard 0
+    ├── SPSC push ──▶  ME[symbol 1]  ──▶ SPMC fan-out ──▶ Risk Shard 1
+    └── SPSC push ──▶  ME[symbol N]  ──▶ SPMC fan-out ──▶ WAL / Metrics
 ```
 
-Every arrow is SPSC or SPMC — never a shared mutex. Every hot core runs `SCHED_FIFO` and is listed in `isolcpus`/`nohz_full`.
+**Key properties:**
+- Every arrow is an SPSC or SPMC ring buffer — no shared mutex anywhere.
+- Each matching engine owns exactly one `OrderBook` — no cross-thread access.
+- Each risk shard owns a contiguous range of `AccountId`s and is the sole writer to those accounts' seqlock states.
+- The sequencer is the single point of total ordering; all downstream components see the same globally-ordered stream.
 
 ---
 
-## Critical Path — Nanosecond Budget
+## Order Book Design
 
-| Stage | Mechanism | p50 | p99 | p99.9 | Kernel? |
-|-------|-----------|-----|-----|-------|---------|
-| NIC DMA → rx_ring | DPDK kernel bypass | 100ns | 300ns | 500ns | ❌ |
-| Zero-copy parse | Pointer cast on DMA buf | 2ns | 5ns | 8ns | ❌ |
-| Tier-0 risk check | Pure fn + ArcSwap load | 8ns | 15ns | 25ns | ❌ |
-| SPSC push → Sequencer | Release store on cursor | 12ns | 20ns | 35ns | ❌ |
-| Sequencer: seq++ | Plain u64 register increment | 1ns | 1ns | 1ns | ❌ |
-| PMEM WAL append | `clwb` + `sfence` instructions | 200ns | 280ns | 350ns | ❌ |
-| SPSC push → ME[symbol] | Release store on cursor | 12ns | 20ns | 35ns | ❌ |
-| Tier-1 seqlock read | 2 atomic Acquire loads | 8ns | 12ns | 18ns | ❌ |
-| book.apply() — match | Array ladder, L1 cache | 80ns | 180ns | 300ns | ❌ |
-| SPMC publish EngineEvent | Release store on write_cur | 10ns | 18ns | 30ns | ❌ |
-| SPSC push → tx_ring | Release store on cursor | 12ns | 20ns | 35ns | ❌ |
-| NIC DMA → wire | DPDK kernel bypass | 100ns | 300ns | 500ns | ❌ |
-| **TOTAL (exchange-internal)** | **Seq dequeue → event pub** | **~420ns** | **~680ns** | **~1.1µs** | **0 calls** |
+The order book uses a **cache-optimal array ladder** — not a `BTreeMap`:
 
----
+- **Array indexed by price tick**: `levels[price - tick_floor]` — O(1) access, no pointer chasing, L1/L2 cache resident for typical tick ranges.
+- **SlotMap arena** for orders: O(1) insert/remove, pre-allocated, zero heap allocation in steady state. Intrusive doubly-linked list within each price level for FIFO time priority.
+- **`#[repr(align(64))]` PriceLevel**: one level per cache line to avoid false sharing.
+- **`i64` fixed-point prices**: deterministic arithmetic, no floating-point rounding. All prices and quantities use a `1e8` scale factor.
+- **`SmallVec<[EngineEvent; 8]>`**: fill events live on the stack; heap spill only on unusually deep sweeps.
 
-## Key Design Decisions
+### Supported Order Types
 
-### SPSC Ring Buffer — The Only Communication Primitive
-Two threads, two cache lines, two atomic operations per message. No CAS. No contention. No retry.
-
-- Producer cursor: `Relaxed` load (own state) → `Release` store (publish)
-- Consumer cursor: `Relaxed` load (own state) → `Release` store (consume)
-- Cross-thread visibility: single `Acquire` load of other thread's cursor
-- Buffer size: always power-of-2; index masking replaces modulo
-
-### Order Book — Cache-Optimal Array Ladder
-- **Array indexed by price tick** (not BTreeMap) — eliminates pointer chasing, ~200ns saved per level
-- **SlotMap arena** for orders — O(1) insert/remove, zero allocation in steady state
-- **`#[repr(align(64))]` PriceLevel** — one level per cache line, no false sharing
-- **i64 fixed-point price** — deterministic WAL replay (f64 rounding breaks idempotency)
-- **`SmallVec<[Fill; 4]>`** — fill lists live on stack; heap overflow only on unusual orders
-
-### PMEM WAL — 300ns Deterministic Durability
-Page cache + `msync` = millisecond p99.9 spikes. PMEM via `clwb` + `sfence` = ~300ns, deterministic, no kernel.
-
-| WAL Strategy | p99.9 | Deterministic? |
-|-------------|-------|----------------|
-| mmap + msync | ~5ms | ❌ |
-| io_uring + O_DIRECT (NVMe) | ~30µs | ✅ |
-| PMEM + clwb/sfence | ~350ns | ✅ |
-
-### Zero CAS on the Order Path
-Sharding eliminates the need for atomic operations:
-
-| State | Naive (CAS) | This Architecture |
-|-------|-------------|-------------------|
-| Sequence counter | `AtomicU64::fetch_add` | Plain `u64` — single owner |
-| Order book | `Arc<Mutex<OrderBook>>` | One ME thread owns one book forever |
-| Account balance | DashMap / CAS loops | Seqlock: one risk shard per account range |
-| Leader election | N/A | Single CAS on `AtomicBool` — once per failover |
+| Type | TIF | Status |
+|------|-----|--------|
+| Limit | GTC | ✅ Fully implemented |
+| Limit | IOC | ✅ Fully implemented |
+| Limit | FOK | ❌ Not implemented (silently treated as GTC) |
+| Market | — | ❌ Not implemented (rejected as price-out-of-range) |
 
 ---
 
-## SPOF Elimination
+## Risk Architecture
 
-| Component | Mitigation | Failover Time | Order Loss |
-|-----------|-----------|---------------|------------|
-| Sequencer | Hot-standby Core 3; shared PMEM WAL; AtomicBool CAS election | < 15ms | Zero |
-| ME[symbol] | Standby ME via WAL replay on promotion | < 500ms | Zero |
-| Risk Shard | Standby shard; state rebuilt from WAL | < 1s | Zero |
-| WAL (PMEM) | 3× replicated to separate PMEM DIMMs + async NVMe backup | None needed | Zero |
-| Gateway | 2+ instances behind L4 LB; DPDK bonded NICs | < 1ms | Zero |
+Risk checking happens at two tiers:
+
+### Tier-0 (Gateway — pre-sequencer)
+Runs on the gateway thread before an order enters the sequencer. Pure function, no allocation, no I/O. Reads the `AccountRiskState` seqlock to check:
+- Account frozen?
+- Order notional within limits?
+- Sufficient available margin (balance − used_margin) for initial margin requirement?
+
+### Tier-1 (Risk Shard — post-match)
+Runs on a dedicated pinned thread, consuming `EngineEvent`s from the SPMC fan-out. For each fill:
+1. Updates per-(account, symbol) `Position` (net qty, VWAP entry, realised PnL).
+2. Recomputes margin across all symbols for the affected account.
+3. Publishes updated `(balance, used_margin)` to the seqlock.
+4. Triggers `InboundCommand::Liquidate` if maintenance margin is breached.
+
+All position arithmetic is **integer fixed-point** (i64, 1e8 scale) — no `f64` anywhere, which guarantees deterministic WAL replay.
+
+---
+
+## WAL & Recovery
+
+### Current Implementation
+- **mmap-backed file** with pre-allocated capacity (default 512 MiB).
+- **Record format**: `[seq: u64][ts_ns: u64][len: u32][crc32: u32][payload][padding]` — 8-byte aligned.
+- **Serialisation**: `bincode` (not zero-copy; allocates per write).
+- **Durability**: `msync(MS_SYNC)` per record when `sync_on_write = true`.
+- **Recovery**: scan WAL from file header, verify CRC32 per record, stop at first corrupt/truncated record. Replay all records after the latest snapshot's sequence number.
+
+### Snapshot System
+Bincode-serialised shard state, stamped with the sequence number at snapshot time. Recovery loads the latest snapshot, then replays only the WAL tail.
 
 ---
 
 ## Workspace Layout
 
 ```
-matching-risk-engine/
-├── crates/
-│   ├── core-types/          # Price, Qty, OrderId, Symbol — fixed-point, no_std
-│   ├── ring-buffer/         # SPSC + SPMC — hand-rolled, loom-tested
-│   ├── seqlock/             # AccountRiskState — loom-tested
-│   ├── order-book/          # Array price ladder + SlotMap arena
-│   ├── matching-engine/     # Per-symbol engine loop, thread-per-core
-│   ├── risk-engine/         # Per-account-shard risk loop
-│   ├── sequencer/           # Global ordering + PMEM WAL + fan-out
-│   ├── sequencer-standby/   # Hot mirror + CAS leader election
-│   ├── wal/                 # PMEM writer + reader + rkyv snapshots
-│   ├── gateway/             # DPDK rx/tx
-│   ├── market-data/         # Best-effort SPMC consumer + UDP multicast
-│   ├── risk-config/         # ArcSwap<RiskConfig> + hot-reload
-│   └── sim/                 # Deterministic single-threaded replay harness
-└── bench/
-    ├── book_apply/          # Isolated book.apply() latency
-    ├── spsc_throughput/     # SPSC push/pop throughput + latency
-    ├── wal_append/          # PMEM WAL append latency distribution
-    └── end_to_end/          # Full pipeline: SPSC→Seq→ME→event
+Match-Risk-Engine/
+├── Cargo.toml                    # Workspace root
+└── crates/
+    ├── core-types/               # Price, Qty, OrderId, Side, Symbol, EngineEvent, InboundCommand
+    ├── ring-buffer/              # SPSC + SPMC ring buffers (hand-rolled, loom-tested)
+    ├── seqlock/                  # AccountRiskState seqlock (loom-tested)
+    ├── order-book/               # Array price ladder + SlotMap arena + matching logic
+    ├── matching-engine/          # Per-symbol engine loop, thread pinning, risk integration
+    ├── risk-engine/              # Tier-0 checks, Tier-1 sharded position/margin tracking
+    ├── sequencer/                # Global ordering, symbol routing, snapshot markers, halt flag
+    ├── wal/                      # mmap WAL writer, snapshot writer, recovery scanner
+    ├── gateway/                  # Tokio TCP server, binary codec, session state, market data hub
+    ├── sim/                      # Deterministic simulation harness, replay, chaos testing
+    ├── dual-log/                 # Dual-engine log coordination (experimental)
+    ├── second-engine/            # Secondary matching engine for dual-write redundancy (experimental)
+    ├── sorter/                   # Event ordering / leader election for dual-engine mode (experimental)
+    ├── metrics/                  # Latency/throughput aggregator (CachePadded atomic counters)
+    └── logger/                   # Structured logging utility
 ```
 
 ---
 
-## Build Order
+## Testing
 
-Build and benchmark each stage before proceeding. Never add the next component until the current one hits its latency target.
+### Unit Tests
+Every core crate has inline unit tests. Key coverage areas:
+- **Order book**: price-time priority, partial/full fills, cancels, wrong-account rejection, IOC semantics, multi-level sweeps, best-bid/ask tracking.
+- **Ring buffers**: push/pop correctness, full-queue backpressure, wrapping semantics.
+- **Seqlock**: read consistency under concurrent writes.
+- **Sequencer**: routing correctness, monotonic sequence numbers, round-robin fairness.
+- **Risk shard**: position updates on fill, margin recomputation, liquidation triggers.
+- **WAL**: write + scan roundtrip, capacity exhaustion, CRC integrity.
+- **Gateway**: auth handshake, codec roundtrip, session command enqueue, market data subscribe/unsubscribe.
 
-| Phase | Component | Target | Test Method |
-|-------|-----------|--------|-------------|
-| 1 | SPSC + seqlock primitives | loom: all interleavings correct | `cargo test --features loom` |
-| 2 | OrderBook (single-threaded) | Differential fuzz vs reference matcher | `cargo fuzz` |
-| 3 | ME + SPSC wired | p99.9 `book.apply()` < 500ns | hdrhistogram in tight loop |
-| 4 | Sequencer + PMEM WAL | WAL append p99.9 < 400ns | RDTSC before/after |
-| 5 | Multi-symbol fan-out (SPMC) | Sequencer throughput > 5M/s | Throughput benchmark |
-| 6 | Risk shards + seqlock | Tier-1 check adds < 20ns to ME | Before/after latency delta |
-| 7 | WAL snapshot + recovery | Deterministic replay: byte-identical state | Chaos test + diff |
-| 8 | Standby + failover | Promotion < 15ms, zero order loss | Kill primary; verify |
-| 9 | DPDK gateway | NIC→SPSC p99.9 < 1µs | Packet generator + timestamps |
+### Differential Fuzz Testing
+The order book is tested against a naive `BTreeMap`-based reference matcher. Both receive identical randomised command sequences; total filled quantities must agree after every command. Runs with deterministic seeds for CI reproducibility and has an ignored soak test for longer runs.
 
----
-
-## Crate Dependencies
-
-| Need | Crate |
-|------|-------|
-| Cache-line padding | `crossbeam-utils::CachePadded` |
-| CPU pinning | `core_affinity` |
-| Generational arenas | `slotmap` |
-| Concurrency model checking | `loom` (dev-dep) |
-| Latency histograms | `hdrhistogram` |
-| Zero-copy snapshots | `rkyv` |
-| Hot-reloadable risk config | `arc-swap` |
-| Global allocator | `mimalloc` |
-| Stack-allocated fill lists | `smallvec` |
-| WAL checksums | `crc32fast` |
-| NIC bypass | `dpdk-rs` / custom FFI |
-| NUMA allocation | `libnuma` FFI |
-
----
-
-## What This Eliminates vs Naive Design
-
-| Eliminated | Was Causing | Latency Recovered |
-|------------|-------------|-------------------|
-| Tokio worker pool | Context switches + cache cold misses | 1–10µs per migration |
-| mmap + msync WAL | OS I/O scheduler non-determinism | ms-range p99.9 spikes |
-| `AtomicU64` seq counter | Unnecessary cache line exclusivity | ~10ns + coherence traffic |
-| CAS per order | Retry storms at peak load | Unbounded latency under load |
-| `Arc<Mutex<OrderBook>>` | All threads serialize on one book | 100–10000ns under contention |
-| Heap allocation per order | malloc jitter + page fault risk | 1–100µs spike elimination |
-| std TCP kernel stack | 50–200µs kernel network processing | 50–200µs eliminated |
-| BTreeMap price levels | Pointer chase per level = cache miss | ~200ns per level access |
-| Timer interrupts on hot cores | OS jitter on `nohz_full=off` cores | Up to 1ms jitter eliminated |
-
----
-
-## Kernel Boot Configuration
+### Loom Concurrency Tests
+SPSC, SPMC, and seqlock crates include `loom` model-checking tests that exhaustively explore thread interleavings to verify memory ordering correctness.
 
 ```bash
-# /etc/default/grub — remove hot cores from OS control
-GRUB_CMDLINE_LINUX="isolcpus=2-14 nohz_full=2-14 rcu_nocbs=2-14
-  processor.max_cstate=1 idle=poll transparent_hugepage=never"
+# Run all tests
+cargo test --workspace
 
-# Disable CPU frequency scaling
-echo performance > /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
+# Run loom concurrency tests
+cargo test --workspace --features loom
 
-# Pre-allocate huge pages for order book arenas
-echo 512 > /proc/sys/vm/nr_hugepages
-
-# Move all IRQs off hot cores
-for irq in /proc/irq/*/smp_affinity; do echo 1 > $irq; done
+# Run differential fuzz soak (longer)
+cargo test --workspace -- --ignored
 ```
 
 ---
-work in Progress
+
+## Build & Run
+
+```bash
+# Build (debug)
+cargo build --workspace
+
+# Build (release — fat LTO, single codegen unit, panic=abort)
+cargo build --workspace --release
+
+# Run all tests
+cargo test --workspace
+```
+
+> **Note**: There is no standalone binary/main entrypoint yet. The system is tested via unit tests, the simulation harness (`sim` crate), and the gateway's integration tests. An end-to-end demo binary is planned.
+
+---
+
+## Known Limitations
+
+These are significant gaps relative to a production matching engine:
+
+1. **No self-trade prevention**: orders from the same account can match against each other. Production systems require configurable STP policies.
+2. **FOK and Market orders are declared but not implemented**: `TimeInForce::Fok` and `OrderType::Market` exist in the type system but are not handled by the matching logic.
+3. **No performance benchmarks**: no criterion benchmarks, no latency histograms, no measured numbers. Latency claims cannot be made without measurement.
+4. **WAL allocates on every write**: `bincode::serialize` allocates a `Vec<u8>` per record, violating zero-allocation goals on the hot path.
+5. **Gateway uses kernel TCP**: the networking layer is a standard Tokio TCP server, not kernel-bypass.
+6. **No CI pipeline**: tests are not run automatically; no GitHub Actions workflow exists.
+
+---
+
+## Roadmap
+
+Roughly ordered by priority:
+
+- [ ] **Self-trade prevention** — configurable STP policy (cancel-resting / cancel-incoming / reject)
+- [ ] **FOK order support** — two-pass probe-then-execute in the matching loop
+- [ ] **Market order support** — price-less aggressive matching at best available
+- [ ] **Criterion benchmarks** — `book.apply()` latency, SPSC roundtrip, end-to-end pipeline
+- [ ] **Per-account risk state on matching engine** — replace single shared state with account-indexed lookup
+- [ ] **Zero-alloc WAL writes** — stack-allocated scratch buffer, write directly into mmap region
+- [ ] **CI pipeline** — GitHub Actions: `cargo test`, `cargo clippy -D warnings`, `cargo fmt --check`
+- [ ] **End-to-end demo binary** — wire all crates together, accept TCP connections, match, emit events
+- [ ] **Sequencer standby + failover** — hot mirror, CAS-based leader election
+- [ ] **PMEM WAL** — `clwb` + `sfence` for sub-microsecond deterministic durability (requires PMEM hardware)
+- [ ] **Kernel-bypass networking** — DPDK or `io_uring` for gateway NIC I/O
+
+---
+
+## Design Goals (Target Architecture)
+
+The long-term goal is a system that obeys five rules on the critical path:
+
+| Rule | Target | Current Status |
+|------|--------|----------------|
+| No Kernel | Zero syscalls between NIC receive and fill publish | ❌ Tokio TCP + mmap msync |
+| No Contention | Only one thread writes any mutable state | ✅ Enforced via `!Sync` |
+| No Allocation | Zero heap allocation after warm-up | ❌ bincode WAL + SmallVec spill possible |
+| No Context Switch | Thread-per-core, hot cores never preempted | ✅ CPU affinity support in matching engine |
+| No Page Cache WAL | PMEM or capacitor-backed NVMe via O_DIRECT | ❌ mmap + msync |
+
+---
+
 *Built by [Krishna Khasge](https://github.com/Kris0721) · Mumbai, India*
