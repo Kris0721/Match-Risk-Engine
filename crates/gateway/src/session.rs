@@ -77,7 +77,11 @@ pub struct Session {
 }
 
 impl Session {
-    pub fn new(id: SessionId, account_id: AccountId, cmd_producer: SpscProducer<Command, 4096>) -> Self {
+    pub fn new(
+        id: SessionId,
+        account_id: AccountId,
+        cmd_producer: SpscProducer<Command, 4096>,
+    ) -> Self {
         Session {
             id,
             account_id,
@@ -99,7 +103,10 @@ impl Session {
     ///   was fully handled with no immediate reply needed.
     /// - `Err(_)` on protocol violation; caller should close the
     ///   connection.
-    pub fn handle_inbound(&mut self, buf: &mut BytesMut) -> Result<Option<SessionAction>, SessionError> {
+    pub fn handle_inbound(
+        &mut self,
+        buf: &mut BytesMut,
+    ) -> Result<Option<SessionAction>, SessionError> {
         let Some(frame) = self.codec.decode(buf)? else {
             return Ok(None);
         };
@@ -136,7 +143,9 @@ impl Session {
     }
 
     fn enqueue(&mut self, cmd: Command) -> Result<(), SessionError> {
-        self.cmd_producer.try_push(cmd).map_err(|_| SessionError::QueueFull)
+        self.cmd_producer
+            .try_push(cmd)
+            .map_err(|_| SessionError::QueueFull)
     }
 
     /// Records the mapping from a client's order id to the engine's
@@ -161,8 +170,10 @@ impl Session {
     /// unless it's market data the session is subscribed to).
     pub fn encode_event(&self, ev: &Event, out: &mut BytesMut) -> Result<bool, CodecError> {
         match ev {
-            Event::Accepted { account_id, .. } | Event::Canceled { account_id, .. }
-            | Event::Rejected { account_id, .. } | Event::Modified { account_id, .. }
+            Event::Accepted { account_id, .. }
+            | Event::Canceled { account_id, .. }
+            | Event::Rejected { account_id, .. }
+            | Event::Modified { account_id, .. }
                 if *account_id == self.account_id =>
             {
                 encode_exec_report(ev, &self.codec, out)?;
@@ -218,7 +229,12 @@ fn decode_new_order(account_id: AccountId, payload: &[u8]) -> Result<NewOrder, S
     let side = match p.get_u8() {
         0 => Side::Buy,
         1 => Side::Sell,
-        _ => return Err(SessionError::MalformedPayload { msg_type: msg_type::NEW_ORDER, reason: "invalid side" }),
+        _ => {
+            return Err(SessionError::MalformedPayload {
+                msg_type: msg_type::NEW_ORDER,
+                reason: "invalid side",
+            })
+        }
     };
     let order_type_tag = p.get_u8();
     let price_raw = p.get_i64_le();
@@ -227,18 +243,31 @@ fn decode_new_order(account_id: AccountId, payload: &[u8]) -> Result<NewOrder, S
         0 => TimeInForce::Gtc,
         1 => TimeInForce::Ioc,
         2 => TimeInForce::Fok,
-        _ => return Err(SessionError::MalformedPayload { msg_type: msg_type::NEW_ORDER, reason: "invalid time_in_force" }),
+        _ => {
+            return Err(SessionError::MalformedPayload {
+                msg_type: msg_type::NEW_ORDER,
+                reason: "invalid time_in_force",
+            })
+        }
     };
 
     let price = Price::new(price_raw);
     let order_type = match order_type_tag {
         0 => OrderType::Limit,
         1 => OrderType::Market,
-        _ => return Err(SessionError::MalformedPayload { msg_type: msg_type::NEW_ORDER, reason: "invalid order_type" }),
+        _ => {
+            return Err(SessionError::MalformedPayload {
+                msg_type: msg_type::NEW_ORDER,
+                reason: "invalid order_type",
+            })
+        }
     };
 
     if qty.is_zero() {
-        return Err(SessionError::MalformedPayload { msg_type: msg_type::NEW_ORDER, reason: "qty must be > 0" });
+        return Err(SessionError::MalformedPayload {
+            msg_type: msg_type::NEW_ORDER,
+            reason: "qty must be > 0",
+        });
     }
 
     Ok(NewOrder {
@@ -267,7 +296,11 @@ fn decode_cancel_order(account_id: AccountId, payload: &[u8]) -> Result<CancelOr
     let mut p = payload;
     let instrument_id = InstrumentId::new(p.get_u64_le());
     let order_id = OrderId::new(p.get_u64_le());
-    Ok(CancelOrder { account_id, instrument_id, order_id })
+    Ok(CancelOrder {
+        account_id,
+        instrument_id,
+        order_id,
+    })
 }
 
 /// `SUBSCRIBE_MD` / `UNSUBSCRIBE_MD` payload layout:
@@ -299,7 +332,14 @@ fn encode_exec_report(ev: &Event, codec: &Codec, out: &mut BytesMut) -> Result<(
     let mut payload = BytesMut::new();
 
     match ev {
-        Event::Accepted { order_id, client_order_id, side, price, qty, .. } => {
+        Event::Accepted {
+            order_id,
+            client_order_id,
+            side,
+            price,
+            qty,
+            ..
+        } => {
             payload.put_u8(0);
             payload.put_u64_le(order_id.get());
             payload.put_u64_le(client_order_id.get());
@@ -324,18 +364,32 @@ fn encode_exec_report(ev: &Event, codec: &Codec, out: &mut BytesMut) -> Result<(
             payload.put_u64_le(fill.aggressor_remaining_qty.lots());
             payload.put_u8(1); // is_aggressor = true for this encoding
         }
-        Event::Canceled { order_id, reason, remaining_qty, .. } => {
+        Event::Canceled {
+            order_id,
+            reason,
+            remaining_qty,
+            ..
+        } => {
             payload.put_u8(2);
             payload.put_u64_le(order_id.get());
             payload.put_u8(cancel_reason_tag(*reason));
             payload.put_u64_le(remaining_qty.lots());
         }
-        Event::Rejected { client_order_id, reason, .. } => {
+        Event::Rejected {
+            client_order_id,
+            reason,
+            ..
+        } => {
             payload.put_u8(3);
             payload.put_u64_le(client_order_id.get());
             payload.put_u8(reject_reason_tag(*reason));
         }
-        Event::Modified { order_id, new_qty, new_price, .. } => {
+        Event::Modified {
+            order_id,
+            new_qty,
+            new_price,
+            ..
+        } => {
             payload.put_u8(4);
             payload.put_u64_le(order_id.get());
             payload.put_u64_le(new_qty.lots());
@@ -385,6 +439,8 @@ fn reject_reason_tag(r: core_types::RejectReason) -> u8 {
         ArenaFull => 9,
         OrderNotFound => 10,
         WrongAccount => 11,
+        FokNotFullyFillable => 12,
+        UnsupportedOrderType => 13,
     }
 }
 
@@ -401,7 +457,15 @@ mod tests {
         (session, consumer)
     }
 
-    fn encode_new_order_payload(coid: u64, instr: u64, side: u8, otype: u8, price: i64, qty: u64, tif: u8) -> BytesMut {
+    fn encode_new_order_payload(
+        coid: u64,
+        instr: u64,
+        side: u8,
+        otype: u8,
+        price: i64,
+        qty: u64,
+        tif: u8,
+    ) -> BytesMut {
         let mut b = BytesMut::new();
         b.put_u64_le(coid);
         b.put_u64_le(instr);
@@ -420,7 +484,9 @@ mod tests {
 
         let payload = encode_new_order_payload(7, 1, 0, 0, 10_050, 5, 0);
         let mut wire = BytesMut::new();
-        codec.encode(msg_type::NEW_ORDER, &payload, &mut wire).unwrap();
+        codec
+            .encode(msg_type::NEW_ORDER, &payload, &mut wire)
+            .unwrap();
 
         let action = session.handle_inbound(&mut wire).unwrap();
         assert!(action.is_none());
@@ -435,9 +501,8 @@ mod tests {
                 assert_eq!(n.qty, Qty::new(5));
                 assert_eq!(n.order_type, core_types::OrderType::Limit);
                 assert_eq!(n.price, Price::new(10_050));
-            }                   
-             _ => panic!("expected limit order"),
-            
+            }
+            _ => panic!("expected limit order"),
         }
     }
 
@@ -448,7 +513,9 @@ mod tests {
 
         let payload = encode_new_order_payload(1, 1, 0, 0, 100, 0, 0);
         let mut wire = BytesMut::new();
-        codec.encode(msg_type::NEW_ORDER, &payload, &mut wire).unwrap();
+        codec
+            .encode(msg_type::NEW_ORDER, &payload, &mut wire)
+            .unwrap();
 
         let err = session.handle_inbound(&mut wire).unwrap_err();
         matches!(err, SessionError::MalformedPayload { .. });
@@ -463,12 +530,16 @@ mod tests {
         payload.put_u64_le(99);
 
         let mut wire = BytesMut::new();
-        codec.encode(msg_type::SUBSCRIBE_MD, &payload, &mut wire).unwrap();
+        codec
+            .encode(msg_type::SUBSCRIBE_MD, &payload, &mut wire)
+            .unwrap();
         session.handle_inbound(&mut wire).unwrap();
         assert!(session.subscriptions.contains(&InstrumentId::new(99)));
 
         let mut wire2 = BytesMut::new();
-        codec.encode(msg_type::UNSUBSCRIBE_MD, &payload, &mut wire2).unwrap();
+        codec
+            .encode(msg_type::UNSUBSCRIBE_MD, &payload, &mut wire2)
+            .unwrap();
         session.handle_inbound(&mut wire2).unwrap();
         assert!(!session.subscriptions.contains(&InstrumentId::new(99)));
     }
@@ -477,7 +548,10 @@ mod tests {
     fn order_mapping_lookup() {
         let (mut session, _consumer) = make_session();
         session.record_order_mapping(ClientOrderId::new(5), OrderId::new(1000));
-        assert_eq!(session.client_order_id_for(OrderId::new(1000)), Some(ClientOrderId::new(5)));
+        assert_eq!(
+            session.client_order_id_for(OrderId::new(1000)),
+            Some(ClientOrderId::new(5))
+        );
         assert_eq!(session.client_order_id_for(OrderId::new(9999)), None);
     }
 

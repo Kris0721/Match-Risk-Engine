@@ -105,7 +105,7 @@ impl OrderBook {
         side: Side,
         price: Price,
         qty: Qty,
-        _order_type: OrderType,
+        order_type: OrderType,
         time_in_force: TimeInForce,
     ) -> EventVec {
         let mut events: EventVec = SmallVec::new();
@@ -119,6 +119,22 @@ impl OrderBook {
                 account_id: account,
                 client_order_id,
                 reason: RejectReason::InvalidQty,
+            });
+            return events;
+        }
+
+        // Market orders are not implemented. Reject explicitly rather than
+        // silently matching them as a Limit order at whatever price
+        // happened to be on the wire — that would be the outcome if this
+        // check weren't here, since `order_type` used to be ignored.
+        if order_type == OrderType::Market {
+            let order_id = OrderId(seq);
+            events.push(EngineEvent::Rejected {
+                seq,
+                order_id,
+                account_id: account,
+                client_order_id,
+                reason: RejectReason::UnsupportedOrderType,
             });
             return events;
         }
@@ -138,6 +154,22 @@ impl OrderBook {
         // Assign the order its identity.  The Sequencer guarantees `seq` is
         // globally unique and monotonically increasing.
         let order_id = OrderId(seq);
+
+        // ── FOK: verify full fillability before touching the book ─────────
+        // A FOK order must fill completely or not at all — no partial fill,
+        // no resting remainder. Unlike IOC (which matches whatever it can
+        // and cancels the rest), FOK must not mutate the book at all if it
+        // can't be fully satisfied right now.
+        if time_in_force == TimeInForce::Fok && !self.can_fully_fill(side, price, qty, account) {
+            events.push(EngineEvent::Rejected {
+                seq,
+                order_id,
+                account_id: account,
+                client_order_id,
+                reason: RejectReason::FokNotFullyFillable,
+            });
+            return events;
+        }
 
         // ── Match against the opposite side ───────────────────────────────
         let mut qty_remaining = qty;
@@ -161,12 +193,18 @@ impl OrderBook {
             return events;
         }
 
-        // ── IOC: cancel the unfilled remainder immediately ─────────────────
-        if time_in_force == TimeInForce::Ioc {
+        // ── IOC / FOK: cancel the unfilled remainder immediately ───────────
+        // FOK should never actually reach this branch with qty_remaining > 0
+        // — `can_fully_fill` already guaranteed a complete fill above, and
+        // nothing else can mutate the book between that check and this call
+        // (single-threaded, no concurrent access). It's handled here anyway
+        // as a defensive fallback so a FOK order can never rest partially
+        // filled if that invariant were ever violated by a future change.
+        if time_in_force == TimeInForce::Ioc || time_in_force == TimeInForce::Fok {
             if qty_remaining < qty {
                 // Partially filled — already emitted Trade events above.
             } else {
-                // Zero fills — emit a Rejected (unfilled IOC).
+                // Zero fills — emit a Rejected (unfilled IOC/FOK).
                 events.push(EngineEvent::Rejected {
                     seq,
                     order_id,
@@ -353,6 +391,66 @@ impl OrderBook {
         }
 
         qty_remaining
+    }
+
+    /// Read-only check: could an order for `side`/`price`/`qty` from
+    /// `account` be fully filled immediately? Used to implement FOK,
+    /// which must reject outright rather than partially fill or rest.
+    ///
+    /// This must stay in lockstep with `match_against_book`'s crossing
+    /// and self-trade-prevention logic: same-account resting orders are
+    /// skipped without counting toward fillable quantity, exactly as
+    /// they would be cancelled-and-skipped by STP during real matching.
+    /// A mismatch here would let a FOK order either fill partially (if
+    /// this over-reports fillable quantity) or reject an order that
+    /// could actually have filled (if it under-reports).
+    fn can_fully_fill(&self, side: Side, price: Price, qty: Qty, account: AccountId) -> bool {
+        let mut remaining: u64 = qty.0;
+
+        // A buy crosses asks, scanning from the lowest price upward; a
+        // sell crosses bids, scanning from the highest price downward.
+        let ladder = match side {
+            Side::Buy => &self.asks,
+            Side::Sell => &self.bids,
+        };
+
+        let n = ladder.len();
+        for step in 0..n {
+            if remaining == 0 {
+                break;
+            }
+
+            let idx = match side {
+                Side::Buy => step,
+                Side::Sell => n - 1 - step,
+            };
+
+            let level_price = self.idx_to_price(idx);
+            let crosses = match side {
+                Side::Buy => price.0 >= level_price.0,
+                Side::Sell => price.0 <= level_price.0,
+            };
+            if !crosses {
+                // Indices are scanned monotonically away from the touch,
+                // so once a level doesn't cross, none further out will.
+                break;
+            }
+
+            let Some(level) = &ladder[idx] else { continue };
+
+            let mut cursor = level.peek_head();
+            while let Some(key) = cursor {
+                let order = &self.arena[key];
+                if order.account != account {
+                    remaining = remaining.saturating_sub(order.qty_remaining.0);
+                    if remaining == 0 {
+                        break;
+                    }
+                }
+                cursor = order.next;
+            }
+        }
+        remaining == 0
     }
 
     // ── Cancel ────────────────────────────────────────────────────────────

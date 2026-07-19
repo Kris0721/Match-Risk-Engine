@@ -1,5 +1,7 @@
 ﻿// Output events emitted by the matching risk engine
-use crate::{AccountId, ClientOrderId, InstrumentId, OrderId, Price, Qty, SequenceNo, Side, Symbol};
+use crate::{
+    AccountId, ClientOrderId, InstrumentId, OrderId, Price, Qty, SequenceNo, Side, Symbol,
+};
 
 /// Reason an order was removed from the book / rejected, used in
 /// `Event::Cancel` and `Event::Reject`.
@@ -31,6 +33,8 @@ pub enum RejectReason {
     ArenaFull,
     OrderNotFound,
     WrongAccount,
+    FokNotFullyFillable,
+    UnsupportedOrderType,
 }
 
 /// Details of a single trade resulting from order matching.
@@ -107,9 +111,15 @@ pub enum Event {
         new_price: Option<Price>,
     },
     /// Trading on an instrument was halted.
-    InstrumentHalted { seq: SequenceNo, instrument_id: InstrumentId },
+    InstrumentHalted {
+        seq: SequenceNo,
+        instrument_id: InstrumentId,
+    },
     /// Trading on an instrument resumed.
-    InstrumentResumed { seq: SequenceNo, instrument_id: InstrumentId },
+    InstrumentResumed {
+        seq: SequenceNo,
+        instrument_id: InstrumentId,
+    },
 }
 
 impl Event {
@@ -158,10 +168,34 @@ pub enum EngineEvent {
     },
 
     // Variants matching the order-book's wire of engine-internal events.
-    Accepted { seq: u64, order_id: OrderId, ts_ns: u64, symbol: Symbol, account_id: AccountId, client_order_id: ClientOrderId, side: Side, price: Price, qty: Qty },
-    Rejected { seq: u64, order_id: OrderId, account_id: AccountId, client_order_id: ClientOrderId, reason: RejectReason },
-    Cancelled { seq: u64, order_id: OrderId },
-    BookTop { seq: u64, symbol: Symbol, bid: Option<Price>, ask: Option<Price> },
+    Accepted {
+        seq: u64,
+        order_id: OrderId,
+        ts_ns: u64,
+        symbol: Symbol,
+        account_id: AccountId,
+        client_order_id: ClientOrderId,
+        side: Side,
+        price: Price,
+        qty: Qty,
+    },
+    Rejected {
+        seq: u64,
+        order_id: OrderId,
+        account_id: AccountId,
+        client_order_id: ClientOrderId,
+        reason: RejectReason,
+    },
+    Cancelled {
+        seq: u64,
+        order_id: OrderId,
+    },
+    BookTop {
+        seq: u64,
+        symbol: Symbol,
+        bid: Option<Price>,
+        ask: Option<Price>,
+    },
 
     /// Acknowledgement that an order has been assigned an engine-wide id
     /// and accepted (useful for gateway execution reports / client acks).
@@ -186,7 +220,9 @@ pub enum EngineEvent {
         symbol: Symbol,
     },
 
-    SnapshotMarker { seq: u64 },
+    SnapshotMarker {
+        seq: u64,
+    },
 }
 
 #[cfg(test)]
@@ -196,7 +232,10 @@ mod tests {
     #[test]
     fn event_seq_accessor() {
         let seq = SequenceNo::FIRST;
-        let ev = Event::InstrumentHalted { seq, instrument_id: InstrumentId::new(1) };
+        let ev = Event::InstrumentHalted {
+            seq,
+            instrument_id: InstrumentId::new(1),
+        };
         assert_eq!(ev.seq(), seq);
     }
 
@@ -224,5 +263,3 @@ mod tests {
         }
     }
 }
-
-
