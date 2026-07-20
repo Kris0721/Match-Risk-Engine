@@ -33,7 +33,7 @@ This is an active work-in-progress. The matching and risk core is functional; th
 | Simulation harness | ✅ Implemented | Deterministic replay, chaos testing scaffolding |
 | Dual-engine redundancy | 🔨 In progress | Second engine + sorter for dual-write architecture |
 | Metrics aggregator | 🔨 In progress | CachePadded counters, latency histograms |
-| FOK order support | ❌ Not implemented | Enum variant exists but matching logic doesn't handle it |
+| FOK order support | ✅ Implemented | Enum variant exists and matching logic handles it |
 | Market order support | ❌ Not implemented | OrderType::Market is parsed but ignored in matching |
 | Self-trade prevention | ❌ Not implemented | No STP policy; accounts can match against themselves |
 | DPDK kernel-bypass networking | ❌ Not implemented | Gateway uses standard Tokio TCP |
