@@ -1,0 +1,18 @@
+[package]
+name = "dpdk-gateway"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+core-types = { path = "../core-types" }
+ring-buffer = { path = "../ring-buffer" }
+logger = { path = "../logger" }
+gateway = { path = "../gateway" }
+
+dpdk-sys = "0.1"
+thiserror = "1"
+libc = "0.2"
+
+[features]
+default = []
+dpdk = []
