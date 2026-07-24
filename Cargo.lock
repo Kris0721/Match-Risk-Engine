@@ -139,6 +139,31 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d0a5c400df2834b80a4c3327b3aad3a4c4cd4de0629063962b03235697506a28"
 
 [[package]]
+name = "dpdk-gateway"
+version = "0.1.0"
+dependencies = [
+ "core-types",
+ "dpdk-sys",
+ "gateway",
+ "libc",
+ "logger",
+ "ring-buffer",
+ "thiserror",
+]
+
+[[package]]
+name = "dpdk-sys"
+version = "0.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cff6114505172bc87c748bda91a69ace2d9ad254422c0cde45f459d29a6a3a82"
+dependencies = [
+ "cc",
+ "libc",
+ "libnuma-sys",
+ "rdma-core-sys",
+]
+
+[[package]]
 name = "dual-log"
 version = "0.1.0"
 dependencies = [
@@ -181,6 +206,16 @@ name = "foldhash"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d9c4f5dac5e15c24eb999c26181a6ca40b39fe946cbe4c263c7209467bc83af2"
+
+[[package]]
+name = "fs2"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9564fc758e15025b46aa6643b1b77d047d1a56a1aea6e01002ac0c7026876213"
+dependencies = [
+ "libc",
+ "winapi",
+]
 
 [[package]]
 name = "funty"
@@ -345,6 +380,15 @@ name = "libc"
 version = "0.2.186"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
+
+[[package]]
+name = "libnuma-sys"
+version = "0.0.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "511079bc1a3e373165edddb73f7ab08b3fbfce1402bf5f6d8ae9b61c4383cb10"
+dependencies = [
+ "libc",
+]
 
 [[package]]
 name = "linux-raw-sys"
@@ -570,6 +614,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "rdma-core-sys"
+version = "0.1.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7ae49b8ac3315a0be444aee9ce7a06c3839f39b041582332a2a177850394bfde"
+dependencies = [
+ "cc",
+ "libc",
+]
+
+[[package]]
 name = "regex-automata"
 version = "0.4.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -703,8 +757,10 @@ version = "0.1.0"
 dependencies = [
  "core-types",
  "crossbeam-utils",
+ "fs2",
  "loom",
  "ring-buffer",
+ "wal",
 ]
 
 [[package]]
@@ -1136,6 +1192,28 @@ dependencies = [
  "indexmap",
  "semver",
 ]
+
+[[package]]
+name = "winapi"
+version = "0.3.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5c839a674fcd7a98952e593242ea400abe93992746761e38641405d28b00f419"
+dependencies = [
+ "winapi-i686-pc-windows-gnu",
+ "winapi-x86_64-pc-windows-gnu",
+]
+
+[[package]]
+name = "winapi-i686-pc-windows-gnu"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ac3b87c63620426dd9b991e5ce0329eff545bccbbb34f3be09ff6fb6ab51b7b6"
+
+[[package]]
+name = "winapi-x86_64-pc-windows-gnu"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "712e227841d057c1ee1cd2fb22fa7e5a5461ae8e48fa2ca79ec42cfc1931183f"
 
 [[package]]
 name = "windows-link"
