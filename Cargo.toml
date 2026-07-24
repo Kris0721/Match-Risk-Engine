@@ -15,7 +15,7 @@ members = [
     "crates/logger",
     "crates/dual-log",
     "crates/second-engine",
-    "crates/sorter",
+    "crates/sorter", "crates/dpdk-gateway",
 ]
 
 [workspace.package]
