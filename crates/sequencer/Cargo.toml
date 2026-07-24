@@ -6,7 +6,9 @@ edition = "2021"
 [dependencies]
 core-types = { path = "../core-types" }
 ring-buffer = { path = "../ring-buffer" }
+wal = { path = "../wal" }
 crossbeam-utils = "0.8"
+fs2 = "0.4"
 loom = { version = "0.7", optional = true }
 
 [dev-dependencies]

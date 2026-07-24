@@ -9,7 +9,7 @@ ring-buffer = { path = "../ring-buffer" }
 logger = { path = "../logger" }
 gateway = { path = "../gateway" }
 
-dpdk-sys = "0.1"
+dpdk-sys = { version = "0.1", optional = true }
 thiserror = "1"
 libc = "0.2"
 

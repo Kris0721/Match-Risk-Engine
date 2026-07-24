@@ -24,9 +24,7 @@
 #[cfg(feature = "loom")]
 use loom::sync::atomic::{AtomicU64, Ordering};
 
-use core_types::{
-    EngineEvent, InboundCommand, SequencedCommand, Symbol,
-};
+use core_types::{EngineEvent, InboundCommand, SequencedCommand, Symbol};
 use ring_buffer::{SpscConsumer, SpscProducer};
 
 use crate::halt::GlobalHalt;
@@ -78,7 +76,9 @@ pub struct MonotonicClock {
 
 impl MonotonicClock {
     pub fn new() -> Self {
-        Self { origin: std::time::Instant::now() }
+        Self {
+            origin: std::time::Instant::now(),
+        }
     }
 }
 
@@ -90,7 +90,9 @@ impl Clock for MonotonicClock {
 }
 
 impl Default for MonotonicClock {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// The Sequencer owns all its queues and drives the main loop.
@@ -120,6 +122,9 @@ pub struct Sequencer<C: Clock> {
     /// Halt flag checked before every dispatch.
     halt: GlobalHalt,
 
+    /// Leader/standby role. The sequencer only dispatches while `Role::Leader`.
+    role: crate::failover::RoleHandle,
+
     /// Snapshot schedule.
     snapshot_schedule: SnapshotMarkerSchedule,
 
@@ -147,20 +152,24 @@ impl<C: Clock> Sequencer<C> {
         wal_out: SpscProducer<SequencedCommand, WAL_CAP>,
         snapshot_out: Vec<SpscProducer<EngineEvent, FANOUT_CAP>>,
         halt: GlobalHalt,
+        role: crate::failover::RoleHandle,
         config: SequencerConfig,
         clock: C,
+        initial_seq: u64,
     ) -> Self {
         assert_eq!(
-            me_inbound.len(), config.n_symbols,
+            me_inbound.len(),
+            config.n_symbols,
             "must have exactly one ME inbound queue per symbol"
         );
         Self {
-            seq: 0,
+            seq: initial_seq,
             gw_inbound,
             me_inbound,
             wal_out,
             snapshot_out,
             halt,
+            role,
             snapshot_schedule: config.snapshot_schedule,
             clock,
             gw_cursor: 0,
@@ -176,6 +185,11 @@ impl<C: Clock> Sequencer<C> {
             if self.halt.is_set() {
                 // In production: drain in-flight commands, flush WAL, then exit.
                 panic!("[sequencer] halt triggered — shutting down");
+            }
+
+            if !self.role.is_leader() {
+                std::hint::spin_loop();
+                continue;
             }
 
             if let Some(cmd) = self.poll_inbound() {
@@ -209,7 +223,11 @@ impl<C: Clock> Sequencer<C> {
         let seq = self.seq;
         let ts_ns = self.clock.now_ns();
 
-        let sequenced = SequencedCommand { seq, ts_ns, cmd: cmd.clone() };
+        let sequenced = SequencedCommand {
+            seq,
+            ts_ns,
+            cmd: cmd.clone(),
+        };
 
         // --- WAL write (best-effort, non-blocking) ---
         if self.wal_out.try_push(sequenced.clone()).is_err() {
@@ -237,12 +255,12 @@ impl<C: Clock> Sequencer<C> {
             }
             None => {
                 if matches!(cmd, InboundCommand::Cancel { .. }) {
-            // The sequencer doesn't track which symbol an order_id
-            // belongs to, so broadcast the cancel to every matching
-            // engine. Each engine's OrderBook safely rejects cancels for
-            // order ids it doesn't own (OrderNotFound, no state change —
-            // see apply_cancel), so exactly one engine acts on this and
-            // the rest are harmless no-ops.
+                    // The sequencer doesn't track which symbol an order_id
+                    // belongs to, so broadcast the cancel to every matching
+                    // engine. Each engine's OrderBook safely rejects cancels for
+                    // order ids it doesn't own (OrderNotFound, no state change —
+                    // see apply_cancel), so exactly one engine acts on this and
+                    // the rest are harmless no-ops.
                     for me in self.me_inbound.iter_mut() {
                         loop {
                             match me.try_push(sequenced.clone()) {
@@ -252,11 +270,11 @@ impl<C: Clock> Sequencer<C> {
                         }
                     }
                 }
-            
-            // FreezeAccount and other privileged, symbol-less commands are
-            // handled by routing to all shards via the WAL + a separate
-            // privileged channel (not modelled here — extend `snapshot_out`
-            // or add a dedicated queue).
+
+                // FreezeAccount and other privileged, symbol-less commands are
+                // handled by routing to all shards via the WAL + a separate
+                // privileged channel (not modelled here — extend `snapshot_out`
+                // or add a dedicated queue).
             }
         }
         // Privileged commands with no symbol (e.g. FreezeAccount) are handled
@@ -288,10 +306,10 @@ impl<C: Clock> Sequencer<C> {
 #[inline]
 fn cmd_symbol(cmd: &InboundCommand) -> Option<Symbol> {
     match cmd {
-        InboundCommand::NewOrder { symbol, .. }  => Some(*symbol),
-        InboundCommand::Cancel   { .. }          => None, // routed by order-id lookup (not modelled here)
+        InboundCommand::NewOrder { symbol, .. } => Some(*symbol),
+        InboundCommand::Cancel { .. } => None, // routed by order-id lookup (not modelled here)
         InboundCommand::Liquidate { symbol, .. } => Some(*symbol),
-        InboundCommand::FreezeAccount { .. }     => None,
+        InboundCommand::FreezeAccount { .. } => None,
     }
 }
 
@@ -303,16 +321,18 @@ mod tests {
 
     struct FakeClock(u64);
     impl Clock for FakeClock {
-        fn now_ns(&self) -> u64 { self.0 }
+        fn now_ns(&self) -> u64 {
+            self.0
+        }
     }
 
     fn make_sequencer(
         n_symbols: usize,
     ) -> (
         Sequencer<FakeClock>,
-        Vec<SpscProducer<InboundCommand, ME_INBOUND_CAP>>,     // gateway producers (test sends here)
-        Vec<SpscConsumer<SequencedCommand, ME_INBOUND_CAP>>,    // ME consumers (test reads here)
-        SpscConsumer<SequencedCommand, WAL_CAP>,                // WAL consumer
+        Vec<SpscProducer<InboundCommand, ME_INBOUND_CAP>>, // gateway producers (test sends here)
+        Vec<SpscConsumer<SequencedCommand, ME_INBOUND_CAP>>, // ME consumers (test reads here)
+        SpscConsumer<SequencedCommand, WAL_CAP>,           // WAL consumer
     ) {
         let mut gw_producers = Vec::new();
         let mut gw_consumers = Vec::new();
@@ -334,14 +354,17 @@ mod tests {
 
         let config = SequencerConfig::new(n_symbols);
         let halt = GlobalHalt::new();
+        let role = crate::failover::RoleHandle::for_test_leader();
         let seq = Sequencer::new(
             gw_consumers,
             me_producers,
             wal_p,
             vec![],
             halt,
+            role,
             config,
             FakeClock(42),
+            0,
         );
 
         (seq, gw_producers, me_consumers, wal_c)
@@ -362,8 +385,7 @@ mod tests {
 
     #[test]
     fn sequences_and_routes_to_correct_symbol() {
-        let (mut seq, mut gw_producers, mut me_consumers, mut wal_c) =
-            make_sequencer(2);
+        let (mut seq, mut gw_producers, mut me_consumers, mut wal_c) = make_sequencer(2);
 
         // Send one order for symbol 0 and one for symbol 1.
         gw_producers[0].try_push(new_order(Symbol(0))).unwrap();
@@ -428,14 +450,17 @@ mod tests {
             config.snapshot_schedule = SnapshotMarkerSchedule::new(2); // fire every 2 seqs
 
             let halt = GlobalHalt::new();
+            let role = crate::failover::RoleHandle::for_test_leader();
             let s = Sequencer::new(
                 gw_consumers,
                 vec![me_p],
                 wal_p,
                 vec![snap_p],
                 halt,
+                role,
                 config,
                 FakeClock(0),
+                0,
             );
             (s, gw_producers, snap_c, ())
         };
@@ -475,7 +500,10 @@ mod tests {
 
         let mut last_seq = 0u64;
         while let Some(sc) = me_consumers[0].try_pop() {
-            assert!(sc.seq > last_seq, "sequence numbers must be strictly increasing");
+            assert!(
+                sc.seq > last_seq,
+                "sequence numbers must be strictly increasing"
+            );
             last_seq = sc.seq;
         }
         assert_eq!(last_seq, 5);
