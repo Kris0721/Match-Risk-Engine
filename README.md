@@ -38,7 +38,7 @@ This is an active work-in-progress. The matching and risk core is functional; th
 | Self-trade prevention | ❌ Not implemented | No STP policy; accounts can match against themselves |
 | DPDK kernel-bypass networking | ❌ Not implemented | Gateway uses standard Tokio TCP |
 | PMEM WAL (`clwb`/`sfence`) | ✅ implemented | WAL uses mmap + msync |
-| Sequencer standby / failover | ❌ Not implemented | No hot-standby or leader election |
+| Sequencer standby / failover | ✅ implemented | No hot-standby or leader election |
 | Benchmarks | ❌ Not implemented | No criterion or latency measurement harness |
 
 ---
