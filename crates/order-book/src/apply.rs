@@ -123,32 +123,24 @@ impl OrderBook {
             return events;
         }
 
-        // Market orders are not implemented. Reject explicitly rather than
-        // silently matching them as a Limit order at whatever price
-        // happened to be on the wire — that would be the outcome if this
-        // check weren't here, since `order_type` used to be ignored.
-        if order_type == OrderType::Market {
-            let order_id = OrderId(seq);
-            events.push(EngineEvent::Rejected {
-                seq,
-                order_id,
-                account_id: account,
-                client_order_id,
-                reason: RejectReason::UnsupportedOrderType,
-            });
-            return events;
-        }
-
-        let Some(price_idx) = self.price_to_idx(price) else {
-            let order_id = OrderId(seq);
-            events.push(EngineEvent::Rejected {
-                seq,
-                order_id,
-                account_id: account,
-                client_order_id,
-                reason: RejectReason::PriceOutOfRange,
-            });
-            return events;
+        // Market orders carry no meaningful limit price, so they're exempt from
+        // ladder-range validation — they never rest on the book and their `price`
+        // field is never used for crossing (see `match_against_book`).
+        let price_idx = if order_type == OrderType::Limit {
+            let Some(idx) = self.price_to_idx(price) else {
+                let order_id = OrderId(seq);
+                events.push(EngineEvent::Rejected {
+                    seq,
+                    order_id,
+                    account_id: account,
+                    client_order_id,
+                    reason: RejectReason::PriceOutOfRange,
+                });
+                return events;
+            };
+            idx
+        } else {
+            0 // Unused — Market orders always take the cancel-remainder branch below.
         };
 
         // Assign the order its identity.  The Sequencer guarantees `seq` is
@@ -160,7 +152,9 @@ impl OrderBook {
         // no resting remainder. Unlike IOC (which matches whatever it can
         // and cancels the rest), FOK must not mutate the book at all if it
         // can't be fully satisfied right now.
-        if time_in_force == TimeInForce::Fok && !self.can_fully_fill(side, price, qty, account) {
+        if time_in_force == TimeInForce::Fok
+            && !self.can_fully_fill(side, price, qty, account, order_type)
+        {
             events.push(EngineEvent::Rejected {
                 seq,
                 order_id,
@@ -183,6 +177,7 @@ impl OrderBook {
             qty_remaining,
             order_id,
             account,
+            order_type,
             &mut events,
         );
 
@@ -200,7 +195,10 @@ impl OrderBook {
         // (single-threaded, no concurrent access). It's handled here anyway
         // as a defensive fallback so a FOK order can never rest partially
         // filled if that invariant were ever violated by a future change.
-        if time_in_force == TimeInForce::Ioc || time_in_force == TimeInForce::Fok {
+        if time_in_force == TimeInForce::Ioc
+            || time_in_force == TimeInForce::Fok
+            || order_type == OrderType::Market
+        {
             if qty_remaining < qty {
                 // Partially filled — already emitted Trade events above.
             } else {
@@ -281,6 +279,7 @@ impl OrderBook {
         mut qty_remaining: Qty,
         aggressor_order_id: OrderId,
         aggressor_account: AccountId,
+        order_type: OrderType,
         events: &mut EventVec,
     ) -> Qty {
         loop {
@@ -288,19 +287,24 @@ impl OrderBook {
                 break;
             }
 
-            // Find the best resting level on the opposite side.
+            // A Market order has no limit price to check — it crosses any resting
+            // level that exists on the opposite side.
             let (best_idx, crosses) = match aggressor_side {
                 Side::Buy => {
                     let Some(idx) = self.best_ask_idx else { break };
                     let ask_price = self.idx_to_price(idx);
-                    // A buy crosses if its limit price ≥ best ask.
-                    (idx, aggressor_price.0 >= ask_price.0)
+                    (
+                        idx,
+                        order_type == OrderType::Market || aggressor_price.0 >= ask_price.0,
+                    )
                 }
                 Side::Sell => {
                     let Some(idx) = self.best_bid_idx else { break };
                     let bid_price = self.idx_to_price(idx);
-                    // A sell crosses if its limit price ≤ best bid.
-                    (idx, aggressor_price.0 <= bid_price.0)
+                    (
+                        idx,
+                        order_type == OrderType::Market || aggressor_price.0 <= bid_price.0,
+                    )
                 }
             };
 
@@ -404,7 +408,14 @@ impl OrderBook {
     /// A mismatch here would let a FOK order either fill partially (if
     /// this over-reports fillable quantity) or reject an order that
     /// could actually have filled (if it under-reports).
-    fn can_fully_fill(&self, side: Side, price: Price, qty: Qty, account: AccountId) -> bool {
+    fn can_fully_fill(
+        &self,
+        side: Side,
+        price: Price,
+        qty: Qty,
+        account: AccountId,
+        order_type: OrderType,
+    ) -> bool {
         let mut remaining: u64 = qty.0;
 
         // A buy crosses asks, scanning from the lowest price upward; a
@@ -426,10 +437,11 @@ impl OrderBook {
             };
 
             let level_price = self.idx_to_price(idx);
-            let crosses = match side {
-                Side::Buy => price.0 >= level_price.0,
-                Side::Sell => price.0 <= level_price.0,
-            };
+            let crosses = order_type == OrderType::Market
+                || match side {
+                    Side::Buy => price.0 >= level_price.0,
+                    Side::Sell => price.0 <= level_price.0,
+                };
             if !crosses {
                 // Indices are scanned monotonically away from the touch,
                 // so once a level doesn't cross, none further out will.
