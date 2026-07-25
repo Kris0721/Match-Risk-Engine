@@ -34,7 +34,7 @@ This is an active work-in-progress. The matching and risk core is functional; th
 | Dual-engine redundancy | 🔨 In progress | Second engine + sorter for dual-write architecture |
 | Metrics aggregator | 🔨 In progress | CachePadded counters, latency histograms |
 | FOK order support | ✅ Implemented | Enum variant exists and matching logic handles it |
-| Market order support | ❌ Not implemented | OrderType::Market is parsed but ignored in matching |
+| Market order support | ✅ implemented | OrderType::Market is parsed but ignored in matching |
 | Self-trade prevention | ❌ Not implemented | No STP policy; accounts can match against themselves |
 | DPDK kernel-bypass networking | ❌ Not implemented | Gateway uses standard Tokio TCP |
 | PMEM WAL (`clwb`/`sfence`) | ✅ implemented | WAL uses mmap + msync |
@@ -96,8 +96,8 @@ The order book uses a **cache-optimal array ladder** — not a `BTreeMap`:
 |------|-----|--------|
 | Limit | GTC | ✅ Fully implemented |
 | Limit | IOC | ✅ Fully implemented |
-| Limit | FOK | ❌ Not implemented (silently treated as GTC) |
-| Market | — | ❌ Not implemented (rejected as price-out-of-range) |
+| Limit | FOK | ✅ implemented (silently treated as GTC) |
+| Market | — | ✅ implemented (rejected as price-out-of-range) |
 
 ---
 
@@ -214,11 +214,10 @@ cargo test --workspace
 These are significant gaps relative to a production matching engine:
 
 1. **No self-trade prevention**: orders from the same account can match against each other. Production systems require configurable STP policies.
-2. **FOK and Market orders are declared but not implemented**: `TimeInForce::Fok` and `OrderType::Market` exist in the type system but are not handled by the matching logic.
-3. **No performance benchmarks**: no criterion benchmarks, no latency histograms, no measured numbers. Latency claims cannot be made without measurement.
-4. **WAL allocates on every write**: `bincode::serialize` allocates a `Vec<u8>` per record, violating zero-allocation goals on the hot path.
-5. **Gateway uses kernel TCP**: the networking layer is a standard Tokio TCP server, not kernel-bypass.
-6. **No CI pipeline**: tests are not run automatically; no GitHub Actions workflow exists.
+2. **No performance benchmarks**: no criterion benchmarks, no latency histograms, no measured numbers. Latency claims cannot be made without measurement.
+3. **WAL allocates on every write**: `bincode::serialize` allocates a `Vec<u8>` per record, violating zero-allocation goals on the hot path.
+4. **Gateway uses kernel TCP**: the networking layer is a standard Tokio TCP server, not kernel-bypass.
+5. **No CI pipeline**: tests are not run automatically; no GitHub Actions workflow exists.
 
 ---
 
@@ -226,9 +225,9 @@ These are significant gaps relative to a production matching engine:
 
 Roughly ordered by priority:
 
-- [ ] **Self-trade prevention** — configurable STP policy (cancel-resting / cancel-incoming / reject)
-- [ ] **FOK order support** — two-pass probe-then-execute in the matching loop
-- [ ] **Market order support** — price-less aggressive matching at best available
+- [x] **Self-trade prevention** — configurable STP policy (cancel-resting / cancel-incoming / reject)
+- [x] **FOK order support** — two-pass probe-then-execute in the matching loop
+- [x] **Market order support** — price-less aggressive matching at best available
 - [ ] **Criterion benchmarks** — `book.apply()` latency, SPSC roundtrip, end-to-end pipeline
 - [ ] **Per-account risk state on matching engine** — replace single shared state with account-indexed lookup
 - [ ] **Zero-alloc WAL writes** — stack-allocated scratch buffer, write directly into mmap region
