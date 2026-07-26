@@ -11,6 +11,11 @@ smallvec = "1"
 [dev-dependencies]
 loom = { version = "0.7", features = ["checkpoint"] }
 rand = "0.8"
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "matching_bench"
+harness = false
 
 [[test]]
 name = "matching_unit"

@@ -13,3 +13,8 @@ wal = { path = "../wal" }
 logger = { path = "../logger" }
 
 [dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "risk_check_bench"
+harness = false
