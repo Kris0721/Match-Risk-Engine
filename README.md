@@ -34,12 +34,12 @@ This is an active work-in-progress. The matching and risk core is functional; th
 | Dual-engine redundancy | 🔨 In progress | Second engine + sorter for dual-write architecture |
 | Metrics aggregator | 🔨 In progress | CachePadded counters, latency histograms |
 | FOK order support | ✅ Implemented | Enum variant exists and matching logic handles it |
-| Market order support | ✅ implemented | OrderType::Market is parsed but ignored in matching |
+| Market order support | ✅ Implemented | OrderType::Market is parsed but ignored in matching |
 | Self-trade prevention | ❌ Not implemented | No STP policy; accounts can match against themselves |
 | DPDK kernel-bypass networking | ❌ Not implemented | Gateway uses standard Tokio TCP |
-| PMEM WAL (`clwb`/`sfence`) | ✅ implemented | WAL uses mmap + msync |
-| Sequencer standby / failover | ✅ implemented | No hot-standby or leader election |
-| Benchmarks | ❌ Not implemented | No criterion or latency measurement harness |
+| PMEM WAL (`clwb`/`sfence`) | ✅ Implemented | WAL uses mmap + msync |
+| Sequencer standby / failover | ✅ Implemented | No hot-standby or leader election |
+| Benchmarks | ✅ Implemented | No criterion or latency measurement harness |
 
 ---
 
@@ -214,10 +214,9 @@ cargo test --workspace
 These are significant gaps relative to a production matching engine:
 
 1. **No self-trade prevention**: orders from the same account can match against each other. Production systems require configurable STP policies.
-2. **No performance benchmarks**: no criterion benchmarks, no latency histograms, no measured numbers. Latency claims cannot be made without measurement.
-3. **WAL allocates on every write**: `bincode::serialize` allocates a `Vec<u8>` per record, violating zero-allocation goals on the hot path.
-4. **Gateway uses kernel TCP**: the networking layer is a standard Tokio TCP server, not kernel-bypass.
-5. **No CI pipeline**: tests are not run automatically; no GitHub Actions workflow exists.
+2. **WAL allocates on every write**: `bincode::serialize` allocates a `Vec<u8>` per record, violating zero-allocation goals on the hot path.
+3. **Gateway uses kernel TCP**: the networking layer is a standard Tokio TCP server, not kernel-bypass.
+4. **No CI pipeline**: tests are not run automatically; no GitHub Actions workflow exists.
 
 ---
 
@@ -228,7 +227,7 @@ Roughly ordered by priority:
 - [x] **Self-trade prevention** — configurable STP policy (cancel-resting / cancel-incoming / reject)
 - [x] **FOK order support** — two-pass probe-then-execute in the matching loop
 - [x] **Market order support** — price-less aggressive matching at best available
-- [ ] **Criterion benchmarks** — `book.apply()` latency, SPSC roundtrip, end-to-end pipeline
+- [x] **Criterion benchmarks** — `book.apply()` latency, SPSC roundtrip, end-to-end pipeline
 - [ ] **Per-account risk state on matching engine** — replace single shared state with account-indexed lookup
 - [ ] **Zero-alloc WAL writes** — stack-allocated scratch buffer, write directly into mmap region
 - [ ] **CI pipeline** — GitHub Actions: `cargo test`, `cargo clippy -D warnings`, `cargo fmt --check`
