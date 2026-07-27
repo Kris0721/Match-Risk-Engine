@@ -72,6 +72,7 @@ pub struct EngineMetrics {
     /// any nonzero value means fills/events were lost and downstream
     /// state (risk shards, gateway sessions) has silently gone stale.
     pub outbound_drops: AtomicU64,
+    pub wal_failures: AtomicU64,
 }
 
 impl EngineMetrics {
@@ -84,6 +85,7 @@ impl EngineMetrics {
             risk_rejects: AtomicU64::new(0),
             idle_spins: AtomicU64::new(0),
             outbound_drops: AtomicU64::new(0),
+            wal_failures: AtomicU64::new(0),
         }
     }
 
@@ -95,6 +97,11 @@ impl EngineMetrics {
         } else if fills > 0 {
             self.fills_generated.fetch_add(fills, Ordering::Relaxed);
         }
+    }
+
+    #[inline]
+    pub fn record_wal_failure(&self) {
+        self.wal_failures.fetch_add(1, Ordering::Relaxed);
     }
 
     #[inline]

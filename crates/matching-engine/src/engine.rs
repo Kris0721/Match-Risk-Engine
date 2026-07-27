@@ -191,10 +191,13 @@ impl<W: WalWriter> MatchingEngine<W> {
         // WAL write happens before publishing so recovery can never see
         // an event that wasn't durably recorded.
         if let Err(e) = self.wal.append_event(&ev) {
-            // In production this would trigger a halt; here we surface
-            // via metrics-friendly panic in debug, no-op in release path
-            // left to caller policy.
-            debug_assert!(false, "WAL append failed: {:?}", e);
+            // WAL failure means durability is broken: halt the engine
+            // (stops the hot loop in `run`) and do NOT publish this
+            // event downstream, in debug or release.
+            self.metrics.record_wal_failure();
+            self.running = false;
+            eprintln!("FATAL: WAL append failed, halting engine: {:?}", e);
+            return;
         }
 
         // Bounded spin-retry: the outbound consumer (risk shards / gateway
