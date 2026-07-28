@@ -177,10 +177,8 @@ impl RiskShard {
     }
 
     /// Recompute `(balance, used_margin)` for an account across all its positions.
-    ///
-    /// `balance`     = initial deposit + sum(realised_pnl across all symbols)
+    /// `balance`     = initial deposit + sum(realised_pnl) + sum(unrealised_pnl, marked at `mark_prices`)
     /// `used_margin` = sum(notional * maintenance_margin_fraction across all open positions)
-    ///
     /// This is intentionally simplified — a real system would also track
     /// funding payments, fees, deposits/withdrawals, etc.
 
@@ -210,6 +208,10 @@ impl RiskShard {
                 .get(symbol)
                 .copied()
                 .unwrap_or(core_types::Price(pos.avg_entry_price));
+
+            // Equity must reflect the same mark price used for margin, or the
+            // two sides of used_margin > balance drift out of sync.
+            balance = balance.saturating_add(pos.unrealised_pnl(mark));
 
             let notional = pos.notional(mark);
 

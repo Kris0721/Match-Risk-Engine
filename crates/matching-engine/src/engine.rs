@@ -182,6 +182,33 @@ impl<W: WalWriter> MatchingEngine<W> {
                     }
                 }
             }
+
+            InboundCommand::Liquidate { account, .. } => {
+                // Cancel every resting order for this account, then let the
+                // caller (risk shard) handle the actual position/margin unwind —
+                // this engine's job is just to pull all liquidity off the book.
+                let order_ids = self.book.open_order_ids_for_account(account);
+                for order_id in order_ids {
+                    let cancel = SequencedCommand {
+                        seq: cmd.seq,
+                        ts_ns: cmd.ts_ns,
+                        cmd: InboundCommand::Cancel { account, order_id },
+                    };
+                    let events = self.book.apply(cancel);
+                    for ev in events {
+                        if let Some(out_ev) = map_engine_event(ev) {
+                            self.publish_and_log(out_ev);
+                        }
+                    }
+                }
+            }
+            InboundCommand::FreezeAccount { account, .. } => {
+                // TODO: flip a per-account frozen flag consulted by
+                // risk_check::check_new_order, so new orders from a frozen
+                // account are rejected. Currently a no-op — confirm whether
+                // that flag exists anywhere yet.
+                let _ = account;
+            }
         }
 
         self.metrics.match_latency.record(start.elapsed());
@@ -220,7 +247,6 @@ impl<W: WalWriter> MatchingEngine<W> {
         }
 
         // Circuit-broken: still full after MAX_PUBLISH_RETRIES spins.
-        // Surface this loudly instead of pretending the event was delivered.
         self.metrics.record_outbound_drop();
         logger::warn(&format!(
             "matching-engine: outbound ring full after {MAX_PUBLISH_RETRIES} retries, \

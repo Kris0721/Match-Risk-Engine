@@ -1,5 +1,5 @@
 // Order book implementation containing bids and asks
-use core_types::{OrderId, AccountId, Price, Qty, Side, Symbol};
+use core_types::{AccountId, OrderId, Price, Qty, Side, Symbol};
 use slotmap::SlotMap;
 
 use crate::level::PriceLevel;
@@ -96,23 +96,35 @@ impl OrderBook {
         }
     }
 
+    /// All order IDs currently resting on the book for `account`.
+    /// Used by Liquidate to build the Cancel commands that unwind a
+    /// breached position. O(n) over open orders — liquidation is rare
+    /// enough that this doesn't need an index.
+    pub fn open_order_ids_for_account(&self, account: AccountId) -> Vec<OrderId> {
+        self.arena
+            .values()
+            .filter(|o| o.account == account)
+            .map(|o| o.id)
+            .collect()
+    }
+
     // ── Price ↔ ladder-index conversions ─────────────────────────────────
 
     /// Convert a `Price` to a ladder index.
     ///
     /// Returns `None` if the price is outside the ladder's range.
     #[inline]
-pub fn price_to_idx(&self, price: Price) -> Option<usize> {
-    let offset = price.0.checked_sub(self.tick_floor.0)?;
-    if offset < 0 {
-        return None;
+    pub fn price_to_idx(&self, price: Price) -> Option<usize> {
+        let offset = price.0.checked_sub(self.tick_floor.0)?;
+        if offset < 0 {
+            return None;
+        }
+        let idx = offset as usize;
+        if idx >= self.bids.len() {
+            return None;
+        }
+        Some(idx)
     }
-    let idx = offset as usize;
-    if idx >= self.bids.len() {
-        return None;
-    }
-    Some(idx)
-}
 
     #[inline]
     pub fn idx_to_price(&self, idx: usize) -> Price {
@@ -126,7 +138,7 @@ pub fn price_to_idx(&self, price: Price) -> Option<usize> {
     pub(crate) fn level_mut(&mut self, side: Side, idx: usize) -> &mut PriceLevel {
         let price = self.idx_to_price(idx);
         let ladder = match side {
-            Side::Buy  => &mut self.bids,
+            Side::Buy => &mut self.bids,
             Side::Sell => &mut self.asks,
         };
         ladder[idx].get_or_insert_with(|| PriceLevel::new(price))
