@@ -180,16 +180,6 @@ impl<W: WalWriter> MatchingEngine<W> {
                     }
                 }
             }
-            _ => {
-                // Other command types (Liquidate, FreezeAccount) are forwarded
-                let events = self.book.apply(cmd);
-                for ev in events {
-                    if let Some(out_ev) = map_engine_event(ev) {
-                        self.publish_and_log(out_ev);
-                    }
-                }
-            }
-
             InboundCommand::Liquidate { account, .. } => {
                 // Cancel every resting order for this account, then let the
                 // caller (risk shard) handle the actual position/margin unwind —

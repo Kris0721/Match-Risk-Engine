@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use bytes::BytesMut;
-use core_types::{AccountId, Command, Event, InstrumentId};
+use core_types::{AccountId, Command, InstrumentId};
 
 use ring_buffer::SpscProducer;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -386,7 +386,7 @@ mod tests {
         AccountId, ClientOrderId, Command, InstrumentId, NewOrder, OrderType, Price, Qty, Side,
         TimeInForce,
     };
-    use std::sync::Mutex;
+
     use tokio::io::AsyncWriteExt;
     use tokio::net::{TcpListener, TcpStream};
 
