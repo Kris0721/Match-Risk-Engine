@@ -21,6 +21,7 @@ pub enum RiskRejectReason {
     PositionLimitExceeded,
     OpenOrderLimitExceeded,
     PriceOutOfBand,
+    UnknownAccount,
 }
 
 /// Static, per-instrument limits configured at startup (cheap to copy).

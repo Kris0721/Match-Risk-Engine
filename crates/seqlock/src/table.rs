@@ -27,8 +27,8 @@ impl AccountRiskTable {
     /// Panics on out-of-range — an undersized account universe is a
     /// startup config error, not something to silently wrap around.
     #[inline]
-    pub fn get(&self, account_id: u64) -> &AccountRiskState {
-        &self.states[account_id as usize]
+    pub fn get(&self, account_id: u64) -> Option<&AccountRiskState> {
+        self.states.get(account_id as usize)
     }
 
     pub fn capacity(&self) -> usize {
@@ -43,16 +43,15 @@ mod tests {
     #[test]
     fn accounts_are_isolated() {
         let table = AccountRiskTable::new(4);
-        table.get(0).update(100, 0, false, false, 5, 1);
-        table.get(1).update(200, 0, false, false, -5, 2);
-        assert_eq!(table.get(0).read().balance, 100);
-        assert_eq!(table.get(1).read().balance, 200);
-        assert_eq!(table.get(2).read().balance, 0); // untouched account
+        table.get(0).unwrap().update(100, 0, false, false, 5, 1);
+        table.get(1).unwrap().update(200, 0, false, false, -5, 2);
+        assert_eq!(table.get(0).unwrap().read().balance, 100);
+        assert_eq!(table.get(1).unwrap().read().balance, 200);
+        assert_eq!(table.get(2).unwrap().read().balance, 0); // untouched account
     }
 
     #[test]
-    #[should_panic]
-    fn out_of_range_panics_instead_of_wrapping() {
-        AccountRiskTable::new(2).get(2);
+    fn out_of_range_returns_none() {
+        assert!(AccountRiskTable::new(2).get(2).is_none());
     }
-}
+} // ← closes mod tests — count that you have exactly this many closing braces at the end

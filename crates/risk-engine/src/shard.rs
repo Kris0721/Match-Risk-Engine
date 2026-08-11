@@ -64,7 +64,8 @@ impl RiskShard {
     pub fn seed_deposit(&mut self, account: AccountId, amount: i64) {
         let local = self.local_idx(account);
         self.initial_deposits[local] = amount;
-        let state = self.states.get(account.0);
+        let state = self.states.get(account.0)
+            .expect("seed_deposit: account within shard's owned range but outside table capacity — shard/table misconfiguration");
         let s = state.read();
         state.update(
             amount,
@@ -125,7 +126,8 @@ impl RiskShard {
                     let (balance, used_margin) = self.recompute_margin(acct, mark_prices);
 
                     // Publish updated state via seqlock.
-                    let state = self.states.get(acct.0);
+                    let state = self.states.get(acct.0)
+                        .expect("process_event: owned account outside table capacity — shard/table misconfiguration");
                     let s = state.read();
                     state.update(
                         balance,
@@ -328,8 +330,8 @@ mod tests {
         shard
             .states
             .get(0)
+            .expect("account 0 within test table capacity")
             .update(1_00000000, 0, false, false, 0, 0);
-
         let marks = HashMap::new();
 
         // Buy a huge position: 100 BTC @ 50,000 USD → notional = 5,000,000 USD
@@ -354,7 +356,11 @@ mod tests {
             "expected liquidation command"
         );
         // Account should be frozen after breach.
-        let snap = shard.states.get(0).read();
+        let snap = shard
+            .states
+            .get(0)
+            .expect("account 0 within test table capacity")
+            .read();
         assert!(snap.frozen);
     }
 }

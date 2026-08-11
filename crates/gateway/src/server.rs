@@ -3,17 +3,17 @@
 //! and wires `Session`s to the inbound command queue and outbound
 //! event/market-data streams.
 
-use std::net::SocketAddr;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::collections::HashSet;
+use std::net::SocketAddr;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use bytes::BytesMut;
 use core_types::{AccountId, Command, Event, InstrumentId};
+
 use ring_buffer::SpscProducer;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-
 
 use crate::codec::Codec;
 use crate::market_data::MarketDataHub;
@@ -61,7 +61,11 @@ impl<F> GatewayServer<F>
 where
     F: Fn(SessionId) -> SpscProducer<Command, 4096> + Send + Sync + 'static,
 {
-    pub fn new(config: GatewayConfig, market_data: Arc<MarketDataHub>, cmd_producer_factory: F) -> Self {
+    pub fn new(
+        config: GatewayConfig,
+        market_data: Arc<MarketDataHub>,
+        cmd_producer_factory: F,
+    ) -> Self {
         GatewayServer {
             config,
             market_data,
@@ -87,8 +91,19 @@ where
             let read_buf_capacity = self.config.read_buf_capacity;
 
             tokio::spawn(async move {
-                if let Err(e) = handle_connection(stream, session_id, peer_addr, cmd_producer, market_data, read_buf_capacity).await {
-                    logger::warn(&format!("session {session_id:?} ({peer_addr}) closed with error: {e}"));
+                if let Err(e) = handle_connection(
+                    stream,
+                    session_id,
+                    peer_addr,
+                    cmd_producer,
+                    market_data,
+                    read_buf_capacity,
+                )
+                .await
+                {
+                    logger::warn(&format!(
+                        "session {session_id:?} ({peer_addr}) closed with error: {e}"
+                    ));
                 }
             });
         }
@@ -120,7 +135,9 @@ async fn handle_connection(
     market_data: Arc<MarketDataHub>,
     read_buf_capacity: usize,
 ) -> std::io::Result<()> {
-    logger::info(&format!("session {session_id:?} connected from {peer_addr}"));
+    logger::info(&format!(
+        "session {session_id:?} connected from {peer_addr}"
+    ));
 
     let (mut read_half, mut write_half) = tokio::io::split(stream);
 
@@ -152,7 +169,6 @@ async fn handle_connection(
     });
 
     let mut forwarded: HashSet<InstrumentId> = HashSet::new();
-    
 
     loop {
         // Process as many complete frames as are already buffered
@@ -185,8 +201,6 @@ async fn handle_connection(
             // Connection closed by peer.
             break;
         }
-    
-                
 
         // After processing inbound frames, spawn forwarders for any
         // newly-added subscriptions. (Idempotent: in a real impl we'd
@@ -220,14 +234,23 @@ async fn handle_connection(
 
 /// Reads a single length-prefixed auth frame and extracts the
 /// `AccountId` from its payload (`u64`, little-endian).
-async fn read_auth_frame<R: AsyncReadExt + Unpin>(reader: &mut R, capacity: usize) -> std::io::Result<(AccountId, BytesMut)> {
+async fn read_auth_frame<R: AsyncReadExt + Unpin>(
+    reader: &mut R,
+    capacity: usize,
+) -> std::io::Result<(AccountId, BytesMut)> {
     let codec = Codec;
     let mut buf = BytesMut::with_capacity(capacity);
 
     loop {
-        if let Some(frame) = codec.decode(&mut buf).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))? {
+        if let Some(frame) = codec
+            .decode(&mut buf)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?
+        {
             if frame.payload.len() != 8 {
-                return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "auth payload must be 8 bytes"));
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "auth payload must be 8 bytes",
+                ));
             }
             let mut p = &frame.payload[..];
             use bytes::Buf;
@@ -237,7 +260,10 @@ async fn read_auth_frame<R: AsyncReadExt + Unpin>(reader: &mut R, capacity: usiz
 
         let n = reader.read_buf(&mut buf).await?;
         if n == 0 {
-            return Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "connection closed during auth"));
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "connection closed during auth",
+            ));
         }
     }
 }
@@ -250,13 +276,21 @@ async fn read_auth_frame<R: AsyncReadExt + Unpin>(reader: &mut R, capacity: usiz
 ///                          u8 has_ask, i64 ask_price, u64 ask_qty
 /// variant 1 (Trade):     u64 instrument_id, i64 price, u64 qty, u8 aggressor_side
 /// variant 2 (HaltStatus): u64 instrument_id, u8 halted
-fn encode_market_data(codec: &Codec, ev: &crate::market_data::MarketDataEvent, out: &mut BytesMut) -> Result<(), crate::codec::CodecError> {
+fn encode_market_data(
+    codec: &Codec,
+    ev: &crate::market_data::MarketDataEvent,
+    out: &mut BytesMut,
+) -> Result<(), crate::codec::CodecError> {
     use crate::market_data::MarketDataEvent::*;
     use bytes::BufMut;
 
     let mut payload = BytesMut::new();
     match ev {
-        TopOfBook { instrument_id, best_bid, best_ask } => {
+        TopOfBook {
+            instrument_id,
+            best_bid,
+            best_ask,
+        } => {
             payload.put_u8(0);
             payload.put_u64_le(instrument_id.get());
             match best_bid {
@@ -284,14 +318,22 @@ fn encode_market_data(codec: &Codec, ev: &crate::market_data::MarketDataEvent, o
                 }
             }
         }
-        Trade { instrument_id, price, qty, aggressor_side } => {
+        Trade {
+            instrument_id,
+            price,
+            qty,
+            aggressor_side,
+        } => {
             payload.put_u8(1);
             payload.put_u64_le(instrument_id.get());
             payload.put_i64_le(price.ticks());
             payload.put_u64_le(qty.lots());
             payload.put_u8(if aggressor_side.is_buy() { 0 } else { 1 });
         }
-        HaltStatus { instrument_id, halted } => {
+        HaltStatus {
+            instrument_id,
+            halted,
+        } => {
             payload.put_u8(2);
             payload.put_u64_le(instrument_id.get());
             payload.put_u8(if *halted { 1 } else { 0 });
@@ -340,7 +382,10 @@ where
 mod tests {
     use super::*;
     use bytes::BufMut;
-    use core_types::{AccountId, ClientOrderId, Command, InstrumentId, NewOrder, OrderType, Price, Qty, Side, TimeInForce};
+    use core_types::{
+        AccountId, ClientOrderId, Command, InstrumentId, NewOrder, OrderType, Price, Qty, Side,
+        TimeInForce,
+    };
     use std::sync::Mutex;
     use tokio::io::AsyncWriteExt;
     use tokio::net::{TcpListener, TcpStream};
@@ -357,9 +402,16 @@ mod tests {
 
         let server_task = tokio::spawn(async move {
             let (stream, peer) = listener.accept().await.unwrap();
-            handle_connection(stream, SessionId(1), peer, producer, MarketDataHub::new(), 4096)
-                .await
-                .unwrap();
+            handle_connection(
+                stream,
+                SessionId(1),
+                peer,
+                producer,
+                MarketDataHub::new(),
+                4096,
+            )
+            .await
+            .unwrap();
         });
 
         let mut client = TcpStream::connect(addr).await.unwrap();
@@ -376,14 +428,16 @@ mod tests {
         let mut order_payload = BytesMut::new();
         order_payload.put_u64_le(1); // client_order_id
         order_payload.put_u64_le(5); // instrument_id
-        order_payload.put_u8(0);     // side = Buy
-        order_payload.put_u8(0);     // order_type = Limit
+        order_payload.put_u8(0); // side = Buy
+        order_payload.put_u8(0); // order_type = Limit
         order_payload.put_i64_le(10_000); // price
         order_payload.put_u64_le(3); // qty
-        order_payload.put_u8(0);     // tif = GTC
+        order_payload.put_u8(0); // tif = GTC
 
         let mut order_frame = BytesMut::new();
-        codec.encode(msg_type::NEW_ORDER, &order_payload, &mut order_frame).unwrap();
+        codec
+            .encode(msg_type::NEW_ORDER, &order_payload, &mut order_frame)
+            .unwrap();
         client.write_all(&order_frame).await.unwrap();
 
         // Give the server a moment to process.
@@ -391,7 +445,16 @@ mod tests {
 
         let cmd = consumer.try_pop().expect("expected enqueued command");
         match cmd {
-            Command::New(NewOrder { account_id, instrument_id, client_order_id, side, price, qty, order_type, time_in_force }) => {
+            Command::New(NewOrder {
+                account_id,
+                instrument_id,
+                client_order_id,
+                side,
+                price,
+                qty,
+                order_type,
+                time_in_force,
+            }) => {
                 assert_eq!(account_id, AccountId::new(42));
                 assert_eq!(instrument_id, InstrumentId::new(5));
                 assert_eq!(client_order_id, ClientOrderId::new(1));
@@ -400,7 +463,6 @@ mod tests {
                 assert_eq!(time_in_force, TimeInForce::Gtc);
                 assert_eq!(order_type, OrderType::Limit);
                 assert_eq!(price, Price::new(10_000));
-                
             }
             _ => panic!("expected New command"),
         }

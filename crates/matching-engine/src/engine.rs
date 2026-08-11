@@ -10,9 +10,9 @@ use std::time::Instant;
 use core_types::events::Event;
 use core_types::ids::SequenceNo;
 use core_types::price::Price;
-use core_types::{AccountId, InboundCommand, RejectReason, SequencedCommand, Symbol};
 
-use order_book::book::{BookConfig, OrderBook};
+use core_types::{EngineEvent, InboundCommand, RejectReason, SequencedCommand};
+use order_book::book::OrderBook;
 use ring_buffer::{SpscConsumer, SpscProducer};
 use seqlock::AccountRiskTable;
 use wal::log::WalWriter;
@@ -123,14 +123,16 @@ impl<W: WalWriter> MatchingEngine<W> {
 
                 let risk_start = Instant::now();
                 let risk_result = {
-                    let state = self.risk_states.get(account.get());
-                    crate::risk_check::check_new_order(
-                        &new_order,
-                        account,
-                        &self.config.limits,
-                        state,
-                        self.reference_price,
-                    )
+                    match self.risk_states.get(account.get()) {
+                        Some(state) => crate::risk_check::check_new_order(
+                            &new_order,
+                            account,
+                            &self.config.limits,
+                            state,
+                            self.reference_price,
+                        ),
+                        None => Err(RiskRejectReason::UnknownAccount), // or nearest existing variant
+                    }
                 };
                 self.metrics.risk_check_latency.record(risk_start.elapsed());
 
@@ -139,6 +141,11 @@ impl<W: WalWriter> MatchingEngine<W> {
                         let engine_events = self.book.apply(cmd);
                         let mut n_fills: u64 = 0;
                         for ev in engine_events {
+                            if let EngineEvent::Trade { price, .. } = &ev {
+                                // Update the reference price used by the price-band risk
+                                // check to the last traded price on this symbol.
+                                self.reference_price = Some(*price);
+                            }
                             if let Some(out_ev) = map_engine_event(ev) {
                                 if matches!(out_ev, Event::Filled { .. }) {
                                     n_fills += 1;
@@ -263,6 +270,7 @@ fn map_risk_reject_reason(reason: RiskRejectReason) -> RejectReason {
         RiskRejectReason::PositionLimitExceeded => RejectReason::RiskLimitBreach,
         RiskRejectReason::OpenOrderLimitExceeded => RejectReason::RiskLimitBreach,
         RiskRejectReason::PriceOutOfBand => RejectReason::PriceOutOfRange,
+        RiskRejectReason::UnknownAccount => RejectReason::RiskLimitBreach,
     }
 }
 
@@ -272,6 +280,8 @@ mod tests {
     use core_types::commands::OrderType;
     use core_types::qty::Qty;
     use core_types::side::Side;
+    use core_types::{AccountId, Symbol};
+    use order_book::book::BookConfig;
     use ring_buffer::spsc_queue;
     use wal::log::NullWal;
 
@@ -377,7 +387,11 @@ mod tests {
 
         // Halt account 1 directly through the shared table, the same way a
         // risk shard would in production.
-        engine.risk_states.get(1).set_halted(true);
+        engine
+            .risk_states
+            .get(1)
+            .expect("test account 1 must be within table capacity")
+            .set_halted(true);
 
         let halted_account_order = SequencedCommand {
             seq: 1,

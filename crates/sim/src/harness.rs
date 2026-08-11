@@ -302,7 +302,10 @@ impl SimHarness {
 
     /// Convenience: read the risk snapshot for one account.
     pub fn account_snapshot(&self, account: AccountId) -> seqlock::AccountRiskSnapshot {
-        self.account_states.get(account.0).read()
+        self.account_states
+            .get(account.0)
+            .expect("account not provisioned in risk table")
+            .read()
     }
 
     /// Drain and return all events emitted so far.

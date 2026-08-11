@@ -50,8 +50,16 @@ impl Replayer {
         let (_, replayed) = self.replay(log);
 
         for i in 0..self.config.n_accounts {
-            let orig = original.account_states.get(i as u64).read();
-            let rep = replayed.account_states.get(i as u64).read();
+            let orig = original
+                .account_states
+                .get(i as u64)
+                .expect("account not provisioned in risk table")
+                .read();
+            let rep = replayed
+                .account_states
+                .get(i as u64)
+                .expect("account not provisioned in risk table")
+                .read();
 
             if orig.balance != rep.balance {
                 return Err(format!(
