@@ -4,16 +4,17 @@
 //! combined view for export (e.g. Prometheus text format).
 //!
 //! Pull-based by design: hot-path components only ever write to local
-//! atomics (see `matching_engine::metrics::EngineMetrics`); this
-//! aggregator runs on a low-priority background thread and never
-//! touches anything the hot path depends on for correctness.
+//! `CachePadded` atomics / histograms (see
+//! `matching_engine::metrics::EngineMetrics`); this aggregator runs on a
+//! low-priority background thread and never touches anything the hot
+//! path depends on for correctness.
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use matching_engine::metrics::{EngineMetrics, EngineMetricsSnapshot};
+use matching_engine::metrics::{EngineMetrics, EngineMetricsSnapshot, LatencySnapshot};
 
 /// Identifies a matching shard (e.g. by instrument group or shard index).
 pub type ShardId = u32;
@@ -38,9 +39,14 @@ impl AggregatedSnapshot {
         self.per_shard.insert(shard_id, snap);
 
         // Recompute totals from scratch over all per-shard snapshots.
+        // Latency totals are merged via full histogram bucket summation
+        // (see `LatencySnapshot::merge`) rather than averaging each
+        // shard's mean/percentiles — percentiles don't compose under
+        // averaging, so this is the only way the combined p50/p99/etc.
+        // are actually correct for the merged population.
         let mut totals = EngineMetricsSnapshot::default();
-        let mut weighted_match_sum: u128 = 0;
-        let mut weighted_risk_sum: u128 = 0;
+        let mut match_latency = LatencySnapshot::default();
+        let mut risk_check_latency = LatencySnapshot::default();
 
         for s in self.per_shard.values() {
             totals.orders_processed += s.orders_processed;
@@ -48,27 +54,12 @@ impl AggregatedSnapshot {
             totals.risk_rejects += s.risk_rejects;
             totals.idle_spins += s.idle_spins;
 
-            totals.match_latency.count += s.match_latency.count;
-            totals.match_latency.max_ns = totals.match_latency.max_ns.max(s.match_latency.max_ns);
-            weighted_match_sum += s.match_latency.mean_ns as u128 * s.match_latency.count as u128;
-
-            totals.risk_check_latency.count += s.risk_check_latency.count;
-            totals.risk_check_latency.max_ns =
-                totals.risk_check_latency.max_ns.max(s.risk_check_latency.max_ns);
-            weighted_risk_sum +=
-                s.risk_check_latency.mean_ns as u128 * s.risk_check_latency.count as u128;
+            match_latency.merge(&s.match_latency);
+            risk_check_latency.merge(&s.risk_check_latency);
         }
 
-        totals.match_latency.mean_ns = if totals.match_latency.count > 0 {
-            (weighted_match_sum / totals.match_latency.count as u128) as u64
-        } else {
-            0
-        };
-        totals.risk_check_latency.mean_ns = if totals.risk_check_latency.count > 0 {
-            (weighted_risk_sum / totals.risk_check_latency.count as u128) as u64
-        } else {
-            0
-        };
+        totals.match_latency = match_latency;
+        totals.risk_check_latency = risk_check_latency;
 
         self.totals = totals;
     }
@@ -138,28 +129,83 @@ impl MetricsAggregator {
     }
 
     /// Render the last collected snapshot in Prometheus text exposition
-    /// format.
+    /// format, including latency percentiles (p50/p90/p99/p99.9) derived
+    /// from each histogram's bucket counts.
     pub fn render_prometheus(&self) -> String {
-        let mut out = String::with_capacity(1024);
+        let mut out = String::with_capacity(2048);
         let snap = &self.last_snapshot;
 
         for (shard_id, s) in &snap.per_shard {
             let labels = format!("shard=\"{}\"", shard_id);
-            write_metric(&mut out, "engine_orders_processed_total", &labels, s.orders_processed as f64);
-            write_metric(&mut out, "engine_fills_generated_total", &labels, s.fills_generated as f64);
-            write_metric(&mut out, "engine_risk_rejects_total", &labels, s.risk_rejects as f64);
-            write_metric(&mut out, "engine_idle_spins_total", &labels, s.idle_spins as f64);
-            write_metric(&mut out, "engine_match_latency_ns_mean", &labels, s.match_latency.mean_ns as f64);
-            write_metric(&mut out, "engine_match_latency_ns_max", &labels, s.match_latency.max_ns as f64);
-            write_metric(&mut out, "engine_risk_check_latency_ns_mean", &labels, s.risk_check_latency.mean_ns as f64);
-            write_metric(&mut out, "engine_risk_check_latency_ns_max", &labels, s.risk_check_latency.max_ns as f64);
+            write_metric(
+                &mut out,
+                "engine_orders_processed_total",
+                &labels,
+                s.orders_processed as f64,
+            );
+            write_metric(
+                &mut out,
+                "engine_fills_generated_total",
+                &labels,
+                s.fills_generated as f64,
+            );
+            write_metric(
+                &mut out,
+                "engine_risk_rejects_total",
+                &labels,
+                s.risk_rejects as f64,
+            );
+            write_metric(
+                &mut out,
+                "engine_idle_spins_total",
+                &labels,
+                s.idle_spins as f64,
+            );
+            write_latency_metrics(
+                &mut out,
+                "engine_match_latency_ns",
+                &labels,
+                &s.match_latency,
+            );
+            write_latency_metrics(
+                &mut out,
+                "engine_risk_check_latency_ns",
+                &labels,
+                &s.risk_check_latency,
+            );
         }
 
-        write_metric(&mut out, "engine_orders_processed_total", "shard=\"_total\"", snap.totals.orders_processed as f64);
-        write_metric(&mut out, "engine_fills_generated_total", "shard=\"_total\"", snap.totals.fills_generated as f64);
-        write_metric(&mut out, "engine_risk_rejects_total", "shard=\"_total\"", snap.totals.risk_rejects as f64);
-        write_metric(&mut out, "engine_match_latency_ns_mean", "shard=\"_total\"", snap.totals.match_latency.mean_ns as f64);
-        write_metric(&mut out, "engine_match_latency_ns_max", "shard=\"_total\"", snap.totals.match_latency.max_ns as f64);
+        let total_labels = "shard=\"_total\"";
+        write_metric(
+            &mut out,
+            "engine_orders_processed_total",
+            total_labels,
+            snap.totals.orders_processed as f64,
+        );
+        write_metric(
+            &mut out,
+            "engine_fills_generated_total",
+            total_labels,
+            snap.totals.fills_generated as f64,
+        );
+        write_metric(
+            &mut out,
+            "engine_risk_rejects_total",
+            total_labels,
+            snap.totals.risk_rejects as f64,
+        );
+        write_latency_metrics(
+            &mut out,
+            "engine_match_latency_ns",
+            total_labels,
+            &snap.totals.match_latency,
+        );
+        write_latency_metrics(
+            &mut out,
+            "engine_risk_check_latency_ns",
+            total_labels,
+            &snap.totals.risk_check_latency,
+        );
 
         out
     }
@@ -169,9 +215,19 @@ fn write_metric(out: &mut String, name: &str, labels: &str, value: f64) {
     let _ = writeln!(out, "{}{{{}}} {}", name, labels, value);
 }
 
+fn write_latency_metrics(out: &mut String, base_name: &str, labels: &str, s: &LatencySnapshot) {
+    write_metric(out, &format!("{base_name}_mean"), labels, s.mean_ns as f64);
+    write_metric(out, &format!("{base_name}_max"), labels, s.max_ns as f64);
+    write_metric(out, &format!("{base_name}_p50"), labels, s.p50() as f64);
+    write_metric(out, &format!("{base_name}_p90"), labels, s.p90() as f64);
+    write_metric(out, &format!("{base_name}_p99"), labels, s.p99() as f64);
+    write_metric(out, &format!("{base_name}_p999"), labels, s.p999() as f64);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     #[test]
     fn aggregates_across_shards() {
@@ -220,5 +276,49 @@ mod tests {
         let text = agg.render_prometheus();
         assert!(text.contains("engine_orders_processed_total{shard=\"7\"}"));
         assert!(text.contains("engine_fills_generated_total{shard=\"_total\"}"));
+    }
+
+    #[test]
+    fn prometheus_render_contains_percentiles() {
+        let mut agg = MetricsAggregator::new(Duration::from_millis(0));
+        let m1 = Arc::new(EngineMetrics::new());
+        for ns in 1..=100u64 {
+            m1.match_latency.record(Duration::from_nanos(ns));
+        }
+        agg.register_shard(1, m1);
+        agg.collect_now();
+
+        let text = agg.render_prometheus();
+        assert!(text.contains("engine_match_latency_ns_p50{shard=\"1\"}"));
+        assert!(text.contains("engine_match_latency_ns_p99{shard=\"_total\"}"));
+    }
+
+    #[test]
+    fn cross_shard_percentiles_reflect_merged_population_not_averaged_shard_percentiles() {
+        let mut agg = MetricsAggregator::new(Duration::from_millis(0));
+
+        // Shard 1: all fast (100ns).
+        let m1 = Arc::new(EngineMetrics::new());
+        for _ in 0..1000 {
+            m1.match_latency.record(Duration::from_nanos(100));
+        }
+
+        // Shard 2: all slow (1,000,000ns).
+        let m2 = Arc::new(EngineMetrics::new());
+        for _ in 0..1000 {
+            m2.match_latency.record(Duration::from_nanos(1_000_000));
+        }
+
+        agg.register_shard(1, m1);
+        agg.register_shard(2, m2);
+        let snap = agg.collect_now();
+
+        // Merged population is 50% fast / 50% slow, so p50 should land
+        // right around the boundary — nowhere near a naive average of
+        // "100ns" and "1,000,000ns" being reported as each shard's own
+        // p50 (which would be correct per-shard but meaningless summed).
+        let merged_p50 = snap.totals.match_latency.p50();
+        assert!(merged_p50 <= 1_000_000);
+        assert_eq!(snap.totals.match_latency.count, 2000);
     }
 }

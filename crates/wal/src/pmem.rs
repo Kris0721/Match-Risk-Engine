@@ -83,7 +83,7 @@ impl CacheFlush {
     fn detect() -> Self {
         // SAFETY: CPUID is always safe to call on x86-64; leaf 7 is
         // universally available on anything from the last ~15 years.
-        let regs = __cpuid_count(7, 0);
+        let regs = unsafe { __cpuid_count(7, 0) };
         if regs.ebx & (1 << 24) != 0 {
             CacheFlush::Clwb
         } else if regs.ebx & (1 << 23) != 0 {

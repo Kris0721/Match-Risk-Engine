@@ -684,6 +684,7 @@ version = "0.1.0"
 dependencies = [
  "core-types",
  "criterion",
+ "crossbeam-utils",
  "logger",
  "order-book",
  "ring-buffer",

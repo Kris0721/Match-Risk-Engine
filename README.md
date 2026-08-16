@@ -31,8 +31,8 @@ This is an active work-in-progress. The matching and risk core is functional; th
 | Gateway (TCP) | ✅ Implemented | Tokio-based, binary codec, session management, market data subscriptions |
 | Differential fuzz tests | ✅ Implemented | Reference `BTreeMap` matcher vs array book — randomised, deterministic seeds |
 | Simulation harness | ✅ Implemented | Deterministic replay, chaos testing scaffolding |
-| Dual-engine redundancy | 🔨 In progress | Second engine + sorter for dual-write architecture |
-| Metrics aggregator | 🔨 In progress | CachePadded counters, latency histograms |
+| Dual-engine redundancy | ✅ Implemented | Second engine + sorter for dual-write architecture |
+| Metrics aggregator | ✅ Implemented | CachePadded counters, latency histograms |
 | FOK order support | ✅ Implemented | Enum variant exists and matching logic handles it |
 | Market order support | ✅ Implemented | OrderType::Market is parsed but ignored in matching |
 | Self-trade prevention | ❌ Not implemented | No STP policy; accounts can match against themselves |

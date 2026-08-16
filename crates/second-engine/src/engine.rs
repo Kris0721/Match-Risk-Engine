@@ -18,9 +18,20 @@
 //! Each worker runs on its own OS thread. Workers share nothing except
 //! the crossbeam channel (for receiving escalated entries) and the
 //! `Arc<LogEntry>` references (for CAS claiming). The order book is
-//! per-worker in this initial implementation; a shared lock-free order
+//! per-worker in this initial implementation — each worker keeps its
+//! own `HashMap<Symbol, OrderBook>`, built fresh from the same
+//! `BookConfig` list every worker is given; a shared lock-free order
 //! book is a future optimization.
+//!
+//! # Symbol routing
+//!
+//! `NewOrder` / `Liquidate` carry an explicit `Symbol` and route to that
+//! one book. `Cancel` / `FreezeAccount` do not carry a symbol (mirrors
+//! the primary engine's per-symbol sharding, where the whole engine only
+//! ever sees one symbol) so, like the deterministic sim harness, they are
+//! broadcast to every book this worker owns.
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
@@ -28,21 +39,33 @@ use std::time::Instant;
 
 use crossbeam_channel::Receiver;
 
+use core_types::commands::{InboundCommand, SequencedCommand};
+use core_types::events::EngineEvent;
+use core_types::ids::{OrderId, Symbol};
 use core_types::log_entry::LogEntry;
 use core_types::order_status::OrderStatus;
 
 use dual_log::PendingRing;
+use order_book::book::BookConfig;
+use order_book::OrderBook;
 
 /// Configuration for the Second Engine.
 #[derive(Debug, Clone)]
 pub struct SecondEngineConfig {
     /// Number of worker threads (default: 8).
     pub worker_count: usize,
+    /// Book configuration for every symbol the Second Engine must be able
+    /// to back up. Each worker builds its own independent set of books
+    /// from this list at startup.
+    pub book_configs: Vec<BookConfig>,
 }
 
 impl Default for SecondEngineConfig {
     fn default() -> Self {
-        Self { worker_count: 8 }
+        Self {
+            worker_count: 8,
+            book_configs: Vec::new(),
+        }
     }
 }
 
@@ -55,6 +78,19 @@ pub struct SecondEngineMetrics {
     pub cas_failures: AtomicU64,
     /// Orders received from the Sorter.
     pub orders_received: AtomicU64,
+    /// Entries claimed for a symbol this worker has no book for.
+    pub unknown_symbol: AtomicU64,
+}
+
+/// Build a fresh `HashMap<Symbol, OrderBook>` from a list of book configs.
+/// Called once per worker at startup so each worker owns an independent
+/// set of books (see module docs on the per-worker book model).
+fn build_books(configs: &[BookConfig]) -> HashMap<Symbol, OrderBook> {
+    configs
+        .iter()
+        .cloned()
+        .map(|cfg| (cfg.symbol, OrderBook::new(cfg)))
+        .collect()
 }
 
 /// The Second Engine — a pool of worker threads that process escalated orders.
@@ -71,7 +107,8 @@ impl SecondEngine {
     /// Start the Second Engine with `config.worker_count` worker threads.
     ///
     /// Each worker pulls from `work_rx` (shared channel from Sorter),
-    /// performs CAS claiming, and processes the order.
+    /// performs CAS claiming, and processes the order against its own
+    /// local order books.
     ///
     /// `pending_ring` is used to remove entries after processing.
     pub fn start(
@@ -86,11 +123,12 @@ impl SecondEngine {
             let rx = work_rx.clone();
             let ring = Arc::clone(&pending_ring);
             let m = Arc::clone(&metrics);
+            let books = build_books(&config.book_configs);
 
             let handle = thread::Builder::new()
                 .name(format!("second-engine-worker-{}", worker_id))
                 .spawn(move || {
-                    Self::worker_loop(worker_id, rx, ring, m);
+                    Self::worker_loop(worker_id, rx, ring, m, books);
                 })
                 .expect("Failed to spawn second engine worker thread");
 
@@ -110,6 +148,7 @@ impl SecondEngine {
         work_rx: Receiver<Arc<LogEntry>>,
         pending_ring: Arc<PendingRing>,
         metrics: Arc<SecondEngineMetrics>,
+        mut books: HashMap<Symbol, OrderBook>,
     ) {
         let clock = Instant::now();
 
@@ -130,16 +169,19 @@ impl SecondEngine {
                 continue; // Another worker got it — skip
             }
 
-            // Step 3: We own this order — process it.
-            // In a full implementation, this would match against the
-            // Second Engine's order book using Log B data. For now,
-            // we record the fill metadata atomically.
+            // Step 3: We own this order — match it against our local
+            // book(s) using the original inbound command from Log B.
             let now_ns = clock.elapsed().as_nanos() as u64;
+            let (fill_price, filled_qty, matched_known_symbol) =
+                apply_escalated(&entry, &mut books);
+
+            if !matched_known_symbol {
+                metrics.unknown_symbol.fetch_add(1, Ordering::Relaxed);
+            }
+
             entry.record_fill(
                 2, // handled_by = secondary
-                now_ns,
-                0, // fill_price — would be set by matching
-                0, // filled_qty — would be set by matching
+                now_ns, fill_price, filled_qty,
             );
 
             // Step 4: Remove from pending ring.
@@ -168,6 +210,102 @@ impl SecondEngine {
     }
 }
 
+/// Apply the entry's original command against the given book set.
+///
+/// Returns `(fill_price, filled_qty, matched_known_symbol)`:
+/// - `fill_price` / `filled_qty` are aggregated from any `Trade` events
+///   where this order (`OrderId(entry.seq)`) was the taker — `0`/`0` if
+///   there were none.
+/// - `matched_known_symbol` is `false` if the command referenced a symbol
+///   this worker has no book for (nothing was applied in that case).
+fn apply_escalated(entry: &LogEntry, books: &mut HashMap<Symbol, OrderBook>) -> (u64, u64, bool) {
+    let seq_cmd = SequencedCommand {
+        seq: entry.seq,
+        ts_ns: entry.timestamp_in,
+        cmd: entry.cmd.clone(),
+    };
+    let this_order_id = OrderId(entry.seq);
+
+    let mut fill_price: u64 = 0;
+    let mut filled_qty: u64 = 0;
+    let mut matched_known_symbol = true;
+
+    match &seq_cmd.cmd {
+        InboundCommand::NewOrder { symbol, .. } => {
+            if let Some(book) = books.get_mut(symbol) {
+                let events = book.apply(seq_cmd);
+                accumulate_fill(&events, this_order_id, &mut fill_price, &mut filled_qty);
+            } else {
+                matched_known_symbol = false;
+            }
+        }
+
+        InboundCommand::Liquidate { symbol, account } => {
+            // Mirrors the primary engine: pull every resting order for
+            // this account off the book via individual Cancels. No fill
+            // data results from a Liquidate, so price/qty stay 0.
+            if let Some(book) = books.get_mut(symbol) {
+                let order_ids = book.open_order_ids_for_account(*account);
+                for order_id in order_ids {
+                    let cancel = SequencedCommand {
+                        seq: seq_cmd.seq,
+                        ts_ns: seq_cmd.ts_ns,
+                        cmd: InboundCommand::Cancel {
+                            account: *account,
+                            order_id,
+                        },
+                    };
+                    let _ = book.apply(cancel);
+                }
+            } else {
+                matched_known_symbol = false;
+            }
+        }
+
+        InboundCommand::Cancel { .. } => {
+            // No symbol on the command itself (same as the primary
+            // engine, which only ever sees one symbol per shard) — this
+            // worker owns potentially many symbols, so broadcast, same
+            // pattern the sim harness uses for routing Cancel/FreezeAccount.
+            for book in books.values_mut() {
+                let _ = book.apply(seq_cmd.clone());
+            }
+        }
+
+        InboundCommand::FreezeAccount { .. } => {
+            // No book-level effect (matches primary engine's handling —
+            // freezing lives in the risk layer, not the book).
+        }
+    }
+
+    (fill_price, filled_qty, matched_known_symbol)
+}
+
+/// Sum quantity and record the last trade price for every `Trade` event
+/// where `this_order_id` was the taker (i.e. this escalated order was the
+/// aggressor that generated the fill).
+fn accumulate_fill(
+    events: &[EngineEvent],
+    this_order_id: OrderId,
+    fill_price: &mut u64,
+    filled_qty: &mut u64,
+) {
+    for ev in events {
+        if let EngineEvent::Trade {
+            price,
+            qty,
+            taker_order_id,
+            ..
+        } = ev
+        {
+            if *taker_order_id == this_order_id {
+                *fill_price = price.raw() as u64;
+                *filled_qty += qty.raw();
+            }
+        }
+    }
+}
+
 /// Process a single escalated entry without spawning threads.
 ///
 /// Used for testing and deterministic simulation. Returns `true` if the
@@ -175,6 +313,7 @@ impl SecondEngine {
 pub fn process_single(
     entry: &LogEntry,
     pending_ring: &PendingRing,
+    books: &mut HashMap<Symbol, OrderBook>,
 ) -> bool {
     let status = entry.load_status();
     if status != OrderStatus::Unaddressed {
@@ -185,7 +324,8 @@ pub fn process_single(
         return false;
     }
 
-    entry.record_fill(2, 0, 0, 0);
+    let (fill_price, filled_qty, _) = apply_escalated(entry, books);
+    entry.record_fill(2, 0, fill_price, filled_qty);
     pending_ring.remove(entry.seq);
     true
 }
@@ -193,21 +333,47 @@ pub fn process_single(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use core_types::{
-        AccountId, ClientOrderId, InboundCommand, OrderType, Price, Qty, Side, Symbol, TimeInForce,
-    };
+    use core_types::{AccountId, ClientOrderId, OrderType, Price, Qty, Side, TimeInForce};
 
-    fn sample_entry(seq: u64) -> Arc<LogEntry> {
+    const SYMBOL: Symbol = Symbol(0);
+
+    fn test_book_configs() -> Vec<BookConfig> {
+        vec![BookConfig {
+            symbol: SYMBOL,
+            tick_floor: Price(0),
+            num_ticks: 1024,
+            arena_capacity: 256,
+        }]
+    }
+
+    fn sample_entry(seq: u64, side: Side, price: i64) -> Arc<LogEntry> {
         Arc::new(LogEntry::new(
             seq,
             0,
             InboundCommand::NewOrder {
                 account: AccountId(1),
                 client_order_id: ClientOrderId::new(seq),
-                symbol: Symbol(0),
-                side: Side::Buy,
-                price: Price(100_00000000),
-                qty: Qty(10_00000000),
+                symbol: SYMBOL,
+                side,
+                price: Price(price),
+                qty: Qty(10),
+                order_type: OrderType::Limit,
+                time_in_force: TimeInForce::Gtc,
+            },
+        ))
+    }
+
+    fn sample_entry_for_account(seq: u64, side: Side, price: i64, account: u64) -> Arc<LogEntry> {
+        Arc::new(LogEntry::new(
+            seq,
+            0,
+            InboundCommand::NewOrder {
+                account: AccountId(account),
+                client_order_id: ClientOrderId::new(seq),
+                symbol: SYMBOL,
+                side,
+                price: Price(price),
+                qty: Qty(10),
                 order_type: OrderType::Limit,
                 time_in_force: TimeInForce::Gtc,
             },
@@ -215,35 +381,45 @@ mod tests {
     }
 
     #[test]
-    fn process_single_claims_unaddressed() {
+    fn process_single_matches_and_records_fill() {
         let ring = PendingRing::new();
-        let entry = sample_entry(1);
-        // Pre-escalate to Unaddressed (as Sorter would)
-        entry.try_claim(OrderStatus::Pending, OrderStatus::Unaddressed);
-        ring.push(Arc::clone(&entry));
+        let mut books = build_books(&test_book_configs());
 
-        assert!(process_single(&entry, &ring));
-        assert_eq!(entry.load_status(), OrderStatus::FinallyHandled);
-        assert_eq!(entry.handled_by.load(Ordering::Acquire), 2);
-        assert!(ring.is_empty());
+        // Rest a sell first (account 1).
+        let resting = sample_entry_for_account(1, Side::Sell, 100, 1);
+        resting.try_claim(OrderStatus::Pending, OrderStatus::Unaddressed);
+        ring.push(Arc::clone(&resting));
+        assert!(process_single(&resting, &ring, &mut books));
+
+        // Escalated buy from a *different* account crosses it.
+        let aggressor = sample_entry_for_account(2, Side::Buy, 100, 2);
+        aggressor.try_claim(OrderStatus::Pending, OrderStatus::Unaddressed);
+        ring.push(Arc::clone(&aggressor));
+        assert!(process_single(&aggressor, &ring, &mut books));
+
+        assert_eq!(aggressor.load_status(), OrderStatus::FinallyHandled);
+        assert_eq!(aggressor.fill_price.load(Ordering::Acquire), 100);
+        assert_eq!(aggressor.filled_qty.load(Ordering::Acquire), 10);
     }
 
     #[test]
     fn process_single_skips_addressed() {
         let ring = PendingRing::new();
-        let entry = sample_entry(1);
+        let mut books = build_books(&test_book_configs());
+        let entry = sample_entry(1, Side::Buy, 100);
         // Primary already claimed it
         entry.try_claim(OrderStatus::Pending, OrderStatus::Addressed);
 
-        assert!(!process_single(&entry, &ring));
+        assert!(!process_single(&entry, &ring, &mut books));
     }
 
     #[test]
     fn process_single_skips_pending() {
         let ring = PendingRing::new();
-        let entry = sample_entry(1);
+        let mut books = build_books(&test_book_configs());
+        let entry = sample_entry(1, Side::Buy, 100);
         // Still Pending — Second Engine shouldn't touch it
-        assert!(!process_single(&entry, &ring));
+        assert!(!process_single(&entry, &ring, &mut books));
     }
 
     #[test]
@@ -251,12 +427,15 @@ mod tests {
         let ring = Arc::new(PendingRing::new());
         let (tx, rx) = crossbeam_channel::unbounded();
 
-        let config = SecondEngineConfig { worker_count: 2 };
+        let config = SecondEngineConfig {
+            worker_count: 2,
+            book_configs: test_book_configs(),
+        };
         let engine = SecondEngine::start(config, rx, Arc::clone(&ring));
 
         // Create and escalate 10 entries
         for i in 1..=10 {
-            let entry = sample_entry(i);
+            let entry = sample_entry(i, Side::Buy, 100);
             entry.try_claim(OrderStatus::Pending, OrderStatus::Unaddressed);
             ring.push(Arc::clone(&entry));
             tx.send(entry).unwrap();
