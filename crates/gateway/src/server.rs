@@ -485,6 +485,12 @@ mod tests {
 
         let (producer, mut consumer) = ring_buffer::spsc::spsc_queue::<InboundCommand, 4096>();
         let (exec_tx, exec_rx) = tokio::sync::broadcast::channel::<Event>(16);
+        drop(exec_tx); // no exec reports flow in this test; dropping the sender
+                       // lets the exec-report forwarder task inside
+                       // handle_connection exit once its `.recv()` sees the
+                       // channel is closed — otherwise it (and the `md_tx`
+                       // clone it holds) never exits, and the connection
+                       // handler hangs forever waiting for the writer task.
 
         let server_task = tokio::spawn(async move {
             let (stream, peer) = listener.accept().await.unwrap();

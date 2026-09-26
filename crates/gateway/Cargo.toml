@@ -11,12 +11,13 @@ logger = { path = "../logger" }
 tokio = { version = "1", features = ["net", "rt-multi-thread", "macros", "sync", "time", "io-util"] }
 bytes = "1"
 thiserror = "1"
-
-[dev-dependencies]
-tokio = { version = "1", features = ["test-util"] }
 rustls = "0.23"
 tokio-rustls = "0.26"
 rustls-pemfile = "2"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["test-util"] }
+
 
 [features]
 session_dispatch = []
