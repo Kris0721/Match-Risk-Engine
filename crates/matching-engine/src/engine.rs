@@ -223,12 +223,20 @@ impl<W: WalWriter> MatchingEngine<W> {
                     }
                 }
             }
-            InboundCommand::FreezeAccount { account, .. } => {
-                // TODO: flip a per-account frozen flag consulted by
-                // risk_check::check_new_order, so new orders from a frozen
-                // account are rejected. Currently a no-op — confirm whether
-                // that flag exists anywhere yet.
-                let _ = account;
+            InboundCommand::FreezeAccount { account } => {
+                // Administrative freeze, distinct from risk-engine's
+                // automatic margin-breach freeze — both write the same
+                // `frozen` flag on the shared seqlock state, so either
+                // source is picked up by `risk_check::check_new_order`.
+                // There is no corresponding "unfreeze" command yet — that's
+                // a separate gap (same class as risk-engine's
+                // deposit-only, no-withdrawal limitation).
+                match self.risk_states.get(account.get()) {
+                    Some(state) => state.set_frozen(true),
+                    None => logger::warn(&format!(
+                        "matching-engine: FreezeAccount for unknown account {account:?}, ignoring"
+                    )),
+                }
             }
         }
 
@@ -281,6 +289,7 @@ fn map_risk_reject_reason(reason: RiskRejectReason) -> RejectReason {
         RiskRejectReason::MaxOrderQtyExceeded => RejectReason::InvalidQuantity,
         RiskRejectReason::MaxOrderNotionalExceeded => RejectReason::RiskLimitBreach,
         RiskRejectReason::AccountHalted => RejectReason::RiskLimitBreach,
+        RiskRejectReason::AccountFrozen => RejectReason::RiskLimitBreach,
         RiskRejectReason::PositionLimitExceeded => RejectReason::RiskLimitBreach,
         RiskRejectReason::OpenOrderLimitExceeded => RejectReason::RiskLimitBreach,
         RiskRejectReason::PriceOutOfBand => RejectReason::PriceOutOfRange,

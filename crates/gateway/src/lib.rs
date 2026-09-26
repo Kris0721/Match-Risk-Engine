@@ -16,8 +16,9 @@ pub mod codec;
 pub mod market_data;
 pub mod server;
 pub mod session;
+pub mod tls;
 
 pub use codec::{Codec, CodecError, Frame};
 pub use market_data::{MarketDataEvent, MarketDataHub};
-pub use server::{GatewayServer, GatewayConfig};
+pub use server::{GatewayConfig, GatewayServer};
 pub use session::{Session, SessionId};

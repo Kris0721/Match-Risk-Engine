@@ -129,6 +129,20 @@ impl AccountRiskState {
     pub fn open_order_count(&self) -> u32 {
         self.read().open_order_count
     }
+    /// Convenience setter — writes only the frozen flag, preserving all
+    /// other fields. Used both by risk-engine's automatic margin-breach
+    /// freeze and by an explicit administrative `FreezeAccount` command.
+    pub fn set_frozen(&self, frozen: bool) {
+        let s = self.read();
+        self.update(
+            s.balance,
+            s.used_margin,
+            frozen,
+            s.halted,
+            s.position,
+            s.open_order_count,
+        );
+    }
 
     /// Convenience setter used in tests — writes only the halted flag,
     /// preserving all other fields.

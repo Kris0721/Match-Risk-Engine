@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 use bytes::BytesMut;
 use core_types::{AccountId, Event, InboundCommand, InstrumentId};
+use tokio::io::{AsyncRead, AsyncWrite};
 
 use ring_buffer::SpscProducer;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -117,6 +118,52 @@ where
             });
         }
     }
+    /// Same as `serve`, but terminates TLS on each accepted connection
+    /// before handing it to the same session logic. This is the path a
+    /// real deployment should use — `serve`/`run` stay available for
+    /// local dev and tests where standing up a cert isn't worth it.
+    pub async fn serve_tls(
+        &self,
+        listener: TcpListener,
+        acceptor: tokio_rustls::TlsAcceptor,
+    ) -> std::io::Result<()> {
+        loop {
+            let (stream, peer_addr) = listener.accept().await?;
+            let acceptor = acceptor.clone();
+            let session_id = SessionId(self.next_session_id.fetch_add(1, Ordering::Relaxed));
+            let market_data = Arc::clone(&self.market_data);
+            let cmd_producer = (self.cmd_producer_factory)(session_id);
+            let read_buf_capacity = self.config.read_buf_capacity;
+            let exec_reports = self.exec_reports.subscribe();
+
+            tokio::spawn(async move {
+                let tls_stream = match acceptor.accept(stream).await {
+                    Ok(s) => s,
+                    Err(e) => {
+                        logger::warn(&format!(
+                            "session {session_id:?} ({peer_addr}) TLS handshake failed: {e}"
+                        ));
+                        return;
+                    }
+                };
+                if let Err(e) = handle_connection(
+                    tls_stream,
+                    session_id,
+                    peer_addr,
+                    cmd_producer,
+                    market_data,
+                    read_buf_capacity,
+                    exec_reports,
+                )
+                .await
+                {
+                    logger::warn(&format!(
+                        "session {session_id:?} ({peer_addr}) closed with error: {e}"
+                    ));
+                }
+            });
+        }
+    }
 }
 
 /// Per-connection I/O loop.
@@ -136,15 +183,18 @@ where
 /// concurrency requires `tokio::io::split` and a write-side mpsc
 /// channel multiplexing exec reports + market data, which is left as
 /// an integration detail for `sim`/production wiring.
-async fn handle_connection(
-    stream: TcpStream,
+async fn handle_connection<S>(
+    stream: S,
     session_id: SessionId,
     peer_addr: SocketAddr,
     cmd_producer: SpscProducer<InboundCommand, 4096>,
     market_data: Arc<MarketDataHub>,
     read_buf_capacity: usize,
     mut exec_reports: tokio::sync::broadcast::Receiver<Event>,
-) -> std::io::Result<()> {
+) -> std::io::Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
     logger::info(&format!(
         "session {session_id:?} connected from {peer_addr}"
     ));

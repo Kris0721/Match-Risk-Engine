@@ -18,6 +18,7 @@ pub enum RiskRejectReason {
     MaxOrderQtyExceeded,
     MaxOrderNotionalExceeded,
     AccountHalted,
+    AccountFrozen,
     PositionLimitExceeded,
     OpenOrderLimitExceeded,
     PriceOutOfBand,
@@ -62,6 +63,10 @@ pub fn check_new_order(
 
     if risk_state.is_halted() {
         return Err(RiskRejectReason::AccountHalted);
+    }
+
+    if risk_state.is_frozen() {
+        return Err(RiskRejectReason::AccountFrozen);
     }
 
     if order.qty > limits.max_order_qty {
@@ -162,6 +167,16 @@ mod tests {
         let order = mk_order(Side::Buy, 10, 100);
         let res = check_new_order(&order, AccountId(1), &limits, &state, None);
         assert_eq!(res, Err(RiskRejectReason::AccountHalted));
+    }
+
+    #[test]
+    fn rejects_when_frozen() {
+        let state = AccountRiskState::default();
+        state.set_frozen(true);
+        let limits = Tier0Limits::default();
+        let order = mk_order(Side::Buy, 10, 100);
+        let res = check_new_order(&order, AccountId(1), &limits, &state, None);
+        assert_eq!(res, Err(RiskRejectReason::AccountFrozen));
     }
 
     #[test]
