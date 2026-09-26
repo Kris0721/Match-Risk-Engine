@@ -1,4 +1,3 @@
-// Order book implementation containing bids and asks
 use core_types::{AccountId, OrderId, Price, Qty, Side, Symbol};
 use slotmap::SlotMap;
 

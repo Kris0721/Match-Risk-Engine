@@ -1,4 +1,3 @@
-// Ultra-fast Tier 0 risk check logic path
 //! Tier-0 risk check — runs on the **gateway thread** before an order enters
 //! the sequencer. Must be allocation-free and branch-predictable.
 //!
@@ -39,19 +38,19 @@ pub fn check(
     price: Price,
     qty: Qty,
 ) -> Result<(), RejectionReason> {
-    // 1. Read the seqlock — this is a single SWMR read, no mutex.
+    // Seqlock read — single SWMR, no mutex.
     let snapshot = account_state.read();
 
-    // 2. Account frozen?
+    // Account frozen?
     if snapshot.frozen {
         return Err(RejectionReason::AccountFrozen);
     }
 
-    // 3. Static order-level checks (notional, qty > 0, price > 0).
+    // Static order-level checks (notional, qty > 0, price > 0).
     tier0_order_check(price, qty, limits)?;
 
-    // 4. Rough margin check: will this order's initial margin fit within
-    //    available balance?  (Full mark-to-market check happens on the shard.)
+    // Rough margin check: will this order's initial margin fit?
+    // (Full mark-to-market check happens on the shard.)
     let qty_i: i64 = qty.0 as i64;
     let order_notional = price.0.saturating_mul(qty_i) / 100_000_000;
     let required_margin = order_notional

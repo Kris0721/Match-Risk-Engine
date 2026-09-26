@@ -8,11 +8,12 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use core_types::InboundCommand;
+use core_types::{Command, InboundCommand};
 use dpdk_sys::{rte_eth_rx_burst, rte_mbuf, rte_pktmbuf_free};
 use ring_buffer::SpscProducer;
 
 use gateway::codec::Codec; // reuse the existing wire format, not a new one
+use gateway::session::msg_type;
 
 const BURST_SIZE: usize = 32;
 /// Ethernet(14) + IP(20, no options) + UDP(8) header bytes to skip
@@ -22,25 +23,31 @@ const HEADER_SKIP: usize = 14 + 20 + 8;
 pub struct RxWorker {
     port_id: u16,
     queue_id: u16,
-    producer: SpscProducer<InboundCommand>,
+    account_id: core_types::AccountId,
+    producer: SpscProducer<InboundCommand, 4092>,
     codec: Codec,
     running: Arc<AtomicBool>,
+    order_port_be: [u8; 2],
 }
 
 impl RxWorker {
     pub fn new(
         port_id: u16,
         queue_id: u16,
+        account_id: core_types::AccountId,
         producer: SpscProducer<InboundCommand>,
         codec: Codec,
         running: Arc<AtomicBool>,
+        order_port_be: [u8; 2],
     ) -> Self {
         Self {
             port_id,
             queue_id,
+            account_id,
             producer,
             codec,
             running,
+            order_port_be: order_port.to_be_bytes(),
         }
     }
 
@@ -75,10 +82,8 @@ impl RxWorker {
         // SAFETY: mbuf is valid and owned by us until rte_pktmbuf_free.
         let (data_ptr, data_len) = unsafe {
             let m = &*mbuf;
-            (
-                dpdk_sys::rte_pktmbuf_mtod(mbuf) as *const u8,
-                m.data_len as usize,
-            )
+            let ptr = (m.buf_addr as *const u8).add(m.data_off as usize);
+            (ptr, m.data_len as usize)
         };
 
         if data_len <= HEADER_SKIP {
@@ -89,23 +94,56 @@ impl RxWorker {
             std::slice::from_raw_parts(data_ptr.add(HEADER_SKIP), data_len - HEADER_SKIP)
         };
 
-        // TODO: verify EtherType/IP protocol/dest UDP port match the
-        // configured order-entry port before trusting `payload` —
-        // omitted here since exact offsets depend on whether you're
-        // also carrying VLAN tags.
+        // EtherType (offset 12-13), IP proto (offset 23 of the eth frame,
+        // i.e. byte 9 of the IPv4 header), dest UDP port (offset 36-37).
+        // Adjust these offsets if you add VLAN tag handling upstream.
+        let raw = unsafe {
+            std::slice::from_raw_parts(data_ptr.sub(HEADER_SKIP), data_len + HEADER_SKIP)
+        };
+        let is_ipv4 = raw.get(12..14) == Some(&[0x08, 0x00]);
+        let is_udp = raw.get(23) == Some(&17u8);
+        let dest_port_ok = raw.get(36..38) == Some(&self.order_port_be);
 
-        match self.codec.decode_command(payload) {
-            Ok(cmd) => {
-                if self.producer.try_push(cmd).is_err() {
-                    // Ring full — matching engine can't keep up. Count
-                    // this, don't block: blocking here defeats the
-                    // point of kernel bypass.
-                    // metrics.rx_ring_full.fetch_add(1, Relaxed);
-                }
-            }
+        if !is_ipv4 || !is_udp || !dest_port_ok {
+            return; // not order-entry traffic, drop silently
+        }
+
+        // A UDP datagram is one already-delimited message (no length-
+        // prefix framing needed the way the TCP stream needs it), but
+        // it's still wire-encoded the same way, so hand it to the same
+        // `Codec` the TCP path uses.
+        let mut buf = bytes::BytesMut::from(payload);
+        let frame = match self.codec.decode(&mut buf) {
+            Ok(Some(frame)) => frame,
+            Ok(None) => return, // incomplete frame — shouldn't happen for one datagram
             Err(_e) => {
                 // metrics.decode_errors.fetch_add(1, Relaxed);
+                return;
             }
+        };
+
+        let cmd = match frame.msg_type {
+            msg_type::NEW_ORDER => {
+                gateway::session::decode_new_order(self.account_id, &frame.payload)
+                    .map(Command::New)
+            }
+            msg_type::CANCEL_ORDER => {
+                gateway::session::decode_cancel_order(self.account_id, &frame.payload)
+                    .map(Command::Cancel)
+            }
+            _ => return, // not order-entry traffic, drop
+        };
+
+        let inbound = match cmd.ok().and_then(|c| InboundCommand::try_from(c).ok()) {
+            Some(inbound) => inbound,
+            None => return, // decode or conversion error — count, don't block the RX core
+        };
+
+        if self.producer.try_push(inbound).is_err() {
+            // Ring full — matching engine can't keep up. Count this,
+            // don't block: blocking here defeats the point of kernel
+            // bypass.
+            // metrics.rx_ring_full.fetch_add(1, Relaxed);
         }
     }
 }

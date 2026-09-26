@@ -1,4 +1,4 @@
-// Circuit breaker and emergency halt logic
+
 //! Global halt switch.
 //!
 //! A single `AtomicBool` checked by the Sequencer before every fan-out.

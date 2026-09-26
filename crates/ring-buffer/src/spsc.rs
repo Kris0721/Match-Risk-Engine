@@ -1,4 +1,3 @@
-// Single-Producer Single-Consumer ring buffer
 //! Single-Producer Single-Consumer ring buffer.
 //!
 //! # Design
@@ -11,15 +10,15 @@
 //! There must be **at most one producer and one consumer** at any point in time.
 //! The type system enforces this: `SpscProducer` and `SpscConsumer` are `!Sync`.
 
-#[cfg(not(feature = "loom"))]
-use std::sync::atomic::{AtomicUsize, Ordering};
 #[cfg(feature = "loom")]
 use loom::sync::atomic::{AtomicUsize, Ordering};
-
 #[cfg(not(feature = "loom"))]
-use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 #[cfg(feature = "loom")]
 use loom::sync::Arc;
+#[cfg(not(feature = "loom"))]
+use std::sync::Arc;
 
 use std::cell::UnsafeCell;
 use std::mem::MaybeUninit;
@@ -42,9 +41,9 @@ unsafe impl<T: Send, const CAP: usize> Send for Shared<T, CAP> {}
 unsafe impl<T: Send, const CAP: usize> Sync for Shared<T, CAP> {}
 
 impl<T, const CAP: usize> Shared<T, CAP> {
+    #[cfg(feature = "loom")]
     fn new() -> Self {
         assert!(CAP.is_power_of_two(), "CAP must be a power of two");
-        // SAFETY: MaybeUninit arrays can be zero-initialized this way.
         let slots = unsafe {
             let mut arr: [UnsafeCell<MaybeUninit<T>>; CAP] = MaybeUninit::uninit().assume_init();
             for slot in arr.iter_mut() {
@@ -59,6 +58,36 @@ impl<T, const CAP: usize> Shared<T, CAP> {
         }
     }
 
+    #[cfg(feature = "loom")]
+    fn new_arc() -> Arc<Self> {
+        // loom's model checker only ever runs tiny CAPs, so the stack cost
+        // below is never an issue there, and loom's Arc doesn't support the
+        // uninit-heap-init trick the non-loom path uses.
+        Arc::new(Self::new())
+    }
+
+    #[cfg(not(feature = "loom"))]
+    fn new_arc() -> Arc<Self> {
+        assert!(CAP.is_power_of_two(), "CAP must be a power of two");
+        // Build directly on the heap instead of as a stack temporary that
+        // `Arc::new` then copies — `slots` alone can be several MB for a
+        // large `CAP`, and debug builds don't elide that copy, so this used
+        // to overflow the calling thread's stack before the value ever
+        // reached the heap.
+        unsafe {
+            let mut arc: Arc<std::mem::MaybeUninit<Self>> = Arc::new_uninit();
+            let ptr = Arc::get_mut(&mut arc)
+                .expect("no other Arc clone can exist yet")
+                .as_mut_ptr();
+            std::ptr::addr_of_mut!((*ptr).head).write(CachePadded::new(AtomicUsize::new(0)));
+            std::ptr::addr_of_mut!((*ptr).tail).write(CachePadded::new(AtomicUsize::new(0)));
+            // `slots` is `UnsafeCell<MaybeUninit<T>>` per element — no
+            // validity requirements, so leaving it as-is matches exactly
+            // what the old code did with `UnsafeCell::new(MaybeUninit::uninit())`.
+            arc.assume_init()
+        }
+    }
+
     #[inline(always)]
     fn mask(&self, idx: usize) -> usize {
         idx & (CAP - 1)
@@ -70,12 +99,12 @@ pub struct SpscProducer<T, const CAP: usize> {
     shared: Arc<Shared<T, CAP>>,
     /// Cached local copy of head to avoid redundant atomic loads.
     cached_head: usize,
-   // !Sync by construction: this type must not be shared across threads.
-   // PhantomData<*const ()> makes the compiler infer !Sync without
-   // requiring the unstable negative_impls feature.
-   _not_sync: std::marker::PhantomData<*const ()>,
+    // !Sync by construction: this type must not be shared across threads.
+    // PhantomData<*const ()> makes the compiler infer !Sync without
+    // requiring the unstable negative_impls feature.
+    _not_sync: std::marker::PhantomData<*const ()>,
 }
-  
+
 /// The consuming end of an SPSC queue. `!Sync` — must not be shared across threads.
 pub struct SpscConsumer<T, const CAP: usize> {
     shared: Arc<Shared<T, CAP>>,
@@ -87,20 +116,25 @@ pub struct SpscConsumer<T, const CAP: usize> {
     _not_sync: std::marker::PhantomData<*const ()>,
 }
 
-// Explicitly not Sync.
-
 // Allow sending producer/consumer between threads (they are single-owner
 // ends of the queue). They must NOT be shared (hence still !Sync).
 unsafe impl<T: Send, const CAP: usize> Send for SpscProducer<T, CAP> {}
 unsafe impl<T: Send, const CAP: usize> Send for SpscConsumer<T, CAP> {}
 
-
 /// Construct a new SPSC queue of capacity `CAP` (must be a power of two).
 pub fn spsc_queue<T, const CAP: usize>() -> (SpscProducer<T, CAP>, SpscConsumer<T, CAP>) {
-    let shared = Arc::new(Shared::new());
+    let shared = Shared::new_arc();
     (
-        SpscProducer { shared: Arc::clone(&shared), cached_head: 0, _not_sync: std::marker::PhantomData },
-        SpscConsumer { shared, cached_tail: 0, _not_sync: std::marker::PhantomData },
+        SpscProducer {
+            shared: Arc::clone(&shared),
+            cached_head: 0,
+            _not_sync: std::marker::PhantomData,
+        },
+        SpscConsumer {
+            shared,
+            cached_tail: 0,
+            _not_sync: std::marker::PhantomData,
+        },
     )
 }
 
@@ -129,7 +163,9 @@ impl<T, const CAP: usize> SpscProducer<T, CAP> {
 
         // Release: makes the slot write visible to the consumer before
         // the head counter is incremented.
-        self.shared.head.store(head.wrapping_add(1), Ordering::Release);
+        self.shared
+            .head
+            .store(head.wrapping_add(1), Ordering::Release);
         self.cached_head = head.wrapping_add(1);
         Ok(())
     }
@@ -158,7 +194,9 @@ impl<T, const CAP: usize> SpscConsumer<T, CAP> {
 
         // Release: makes the slot read (freeing the slot) visible to the
         // producer before the tail counter is incremented.
-        self.shared.tail.store(tail.wrapping_add(1), Ordering::Release);
+        self.shared
+            .tail
+            .store(tail.wrapping_add(1), Ordering::Release);
         self.cached_tail = tail.wrapping_add(1);
         Some(item)
     }

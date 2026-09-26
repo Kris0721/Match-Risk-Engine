@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use bytes::BytesMut;
-use core_types::{AccountId, Command, InstrumentId};
+use core_types::{AccountId, Event, InboundCommand, InstrumentId};
 
 use ring_buffer::SpscProducer;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -49,28 +49,31 @@ impl Default for GatewayConfig {
 /// supply an in-memory factory.
 pub struct GatewayServer<F>
 where
-    F: Fn(SessionId) -> SpscProducer<Command, 4096> + Send + Sync + 'static,
+    F: Fn(SessionId) -> SpscProducer<InboundCommand, 4096> + Send + Sync + 'static,
 {
     config: GatewayConfig,
     market_data: Arc<MarketDataHub>,
     cmd_producer_factory: Arc<F>,
     next_session_id: AtomicU64,
+    exec_reports: tokio::sync::broadcast::Sender<Event>,
 }
 
 impl<F> GatewayServer<F>
 where
-    F: Fn(SessionId) -> SpscProducer<Command, 4096> + Send + Sync + 'static,
+    F: Fn(SessionId) -> SpscProducer<InboundCommand, 4096> + Send + Sync + 'static,
 {
     pub fn new(
         config: GatewayConfig,
         market_data: Arc<MarketDataHub>,
         cmd_producer_factory: F,
+        exec_reports: tokio::sync::broadcast::Sender<Event>,
     ) -> Self {
         GatewayServer {
             config,
             market_data,
             cmd_producer_factory: Arc::new(cmd_producer_factory),
             next_session_id: AtomicU64::new(1),
+            exec_reports,
         }
     }
 
@@ -80,15 +83,20 @@ where
     pub async fn run(&self) -> std::io::Result<()> {
         let listener = TcpListener::bind(self.config.bind_addr).await?;
         logger::info(&format!("gateway listening on {}", self.config.bind_addr));
+        self.serve(listener).await
+    }
 
+    /// Same accept loop as `run`, but takes an already-bound listener —
+    /// lets a caller bind `"127.0.0.1:0"` and read the real port via
+    /// `listener.local_addr()` before serving (needed for tests).
+    pub async fn serve(&self, listener: TcpListener) -> std::io::Result<()> {
         loop {
             let (stream, peer_addr) = listener.accept().await?;
             let session_id = SessionId(self.next_session_id.fetch_add(1, Ordering::Relaxed));
-            // Relaxed: session_id is a local identifier only; no happens-before
-            // relationship with the spawned task's data is required.
             let market_data = Arc::clone(&self.market_data);
             let cmd_producer = (self.cmd_producer_factory)(session_id);
             let read_buf_capacity = self.config.read_buf_capacity;
+            let exec_reports = self.exec_reports.subscribe();
 
             tokio::spawn(async move {
                 if let Err(e) = handle_connection(
@@ -98,6 +106,7 @@ where
                     cmd_producer,
                     market_data,
                     read_buf_capacity,
+                    exec_reports,
                 )
                 .await
                 {
@@ -131,9 +140,10 @@ async fn handle_connection(
     stream: TcpStream,
     session_id: SessionId,
     peer_addr: SocketAddr,
-    cmd_producer: SpscProducer<Command, 4096>,
+    cmd_producer: SpscProducer<InboundCommand, 4096>,
     market_data: Arc<MarketDataHub>,
     read_buf_capacity: usize,
+    mut exec_reports: tokio::sync::broadcast::Receiver<Event>,
 ) -> std::io::Result<()> {
     logger::info(&format!(
         "session {session_id:?} connected from {peer_addr}"
@@ -164,6 +174,31 @@ async fn handle_connection(
         while let Some(frame) = md_rx.recv().await {
             if write_half.write_all(&frame).await.is_err() {
                 break;
+            }
+        }
+    });
+
+    // Forward exec reports relevant to this account onto the same writer
+    // channel as market data — previously nothing did this at all.
+    tokio::spawn({
+        let tx = md_tx.clone();
+        let codec = codec;
+        async move {
+            loop {
+                match exec_reports.recv().await {
+                    Ok(ev) => {
+                        let mut buf = BytesMut::new();
+                        if let Ok(true) =
+                            Session::encode_event_for(account_id, &codec, &ev, &mut buf)
+                        {
+                            if tx.send(buf).await.is_err() {
+                                break;
+                            }
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
             }
         }
     });
@@ -398,7 +433,8 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 
-        let (producer, mut consumer) = ring_buffer::spsc::spsc_queue::<Command, 4096>();
+        let (producer, mut consumer) = ring_buffer::spsc::spsc_queue::<InboundCommand, 4096>();
+        let (exec_tx, exec_rx) = tokio::sync::broadcast::channel::<Event>(16);
 
         let server_task = tokio::spawn(async move {
             let (stream, peer) = listener.accept().await.unwrap();
@@ -409,6 +445,7 @@ mod tests {
                 producer,
                 MarketDataHub::new(),
                 4096,
+                exec_rx,
             )
             .await
             .unwrap();
@@ -445,18 +482,18 @@ mod tests {
 
         let cmd = consumer.try_pop().expect("expected enqueued command");
         match cmd {
-            Command::New(NewOrder {
-                account_id,
-                instrument_id,
+            InboundCommand::NewOrder {
+                account,
+                symbol,
                 client_order_id,
                 side,
-                price,
                 qty,
                 order_type,
+                price,
                 time_in_force,
-            }) => {
-                assert_eq!(account_id, AccountId::new(42));
-                assert_eq!(instrument_id, InstrumentId::new(5));
+            } => {
+                assert_eq!(account, AccountId::new(42));
+                assert_eq!(symbol, core_types::Symbol(5));
                 assert_eq!(client_order_id, ClientOrderId::new(1));
                 assert_eq!(side, Side::Buy);
                 assert_eq!(qty, Qty::new(3));

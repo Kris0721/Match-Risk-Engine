@@ -1,4 +1,3 @@
-// Sharding accounts across different risk evaluators
 //! Risk shard: owns a contiguous range of `AccountId`s.
 //!
 //! This is the **Tier-1** risk path. It runs on its own pinned thread, consuming
@@ -118,14 +117,11 @@ impl RiskShard {
                         continue;
                     }
 
-                    // Update position.
                     let pos = self.positions.entry((acct, symbol)).or_default();
                     pos.apply_fill(side, price, qty);
 
-                    // Recompute margin across all symbols for this account.
                     let (balance, used_margin) = self.recompute_margin(acct, mark_prices);
 
-                    // Publish updated state via seqlock.
                     let state = self.states.get(acct.0)
                         .expect("process_event: owned account outside table capacity — shard/table misconfiguration");
                     let s = state.read();
@@ -138,7 +134,6 @@ impl RiskShard {
                         s.open_order_count,
                     );
 
-                    // Trigger liquidation if maintenance margin breached.
                     if used_margin > balance {
                         liquidate_cmds.push(InboundCommand::Liquidate {
                             account: acct,
@@ -198,7 +193,6 @@ impl RiskShard {
             if *acct != account {
                 continue;
             }
-            // Add realised PnL to balance.
             balance = balance.saturating_add(pos.realised_pnl);
 
             if pos.net_qty == 0 {

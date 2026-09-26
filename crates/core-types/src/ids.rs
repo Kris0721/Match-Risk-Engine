@@ -61,6 +61,28 @@ id_type!(
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Symbol(pub u16);
 
+/// Error returned when an `InstrumentId` doesn't fit in the sequencer's
+/// `Symbol(u16)` routing space (see `sequencer::MAX_SYMBOLS`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SymbolRangeError(pub InstrumentId);
+
+impl fmt::Display for SymbolRangeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "instrument id {} does not fit in a Symbol (u16)", self.0)
+    }
+}
+impl std::error::Error for SymbolRangeError {}
+
+impl TryFrom<InstrumentId> for Symbol {
+    type Error = SymbolRangeError;
+
+    fn try_from(id: InstrumentId) -> Result<Self, Self::Error> {
+        u16::try_from(id.0)
+            .map(Symbol)
+            .map_err(|_| SymbolRangeError(id))
+    }
+}
+
 id_type!(
     /// Client-supplied order identifier, echoed back in execution
     /// reports for client-side correlation. Distinct from `OrderId`,
@@ -132,5 +154,3 @@ mod tests {
         assert_eq!(first.next().get(), 2);
     }
 }
-
-

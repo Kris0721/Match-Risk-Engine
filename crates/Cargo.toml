@@ -1,0 +1,23 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/core-types",
+    "crates/ring-buffer",
+    "crates/seqlock",
+    "crates/logger",
+    "crates/order-book",
+    "crates/risk-engine",
+    "crates/wal",
+    "crates/matching-engine",
+    "crates/sequencer",
+    "crates/gateway",
+    "crates/dpdk-gateway",
+    "crates/dual-log",
+    "crates/sorter",
+    "crates/second-engine",
+    "crates/sim",
+    "crates/metrics",
+]
+
+[workspace.package]
+edition = "2021"

@@ -1,4 +1,3 @@
-// Price level in the order book
 use core_types::{Price, Qty};
 use slotmap::SlotMap;
 

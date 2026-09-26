@@ -1,4 +1,3 @@
-// Order struct and representation
 use core_types::{OrderId, AccountId, Qty, Side};
 use slotmap::new_key_type;
 

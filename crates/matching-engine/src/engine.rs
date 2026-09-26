@@ -1,4 +1,3 @@
-// Matching engine execution loop
 //! The matching engine hot loop: pulls commands off the inbound SPSC
 //! ring from the sequencer, applies tier-0 risk checks, matches against
 //! the order book, publishes resulting events, and updates the
@@ -13,7 +12,7 @@ use core_types::price::Price;
 
 use core_types::{EngineEvent, InboundCommand, RejectReason, SequencedCommand};
 use order_book::book::OrderBook;
-use ring_buffer::{SpscConsumer, SpscProducer};
+use ring_buffer::{SpmcProducer, SpscConsumer, SpscProducer};
 use seqlock::AccountRiskTable;
 use wal::log::WalWriter;
 
@@ -22,21 +21,25 @@ use crate::risk_check::{RiskRejectReason, Tier0Limits};
 
 use crate::mapper::map_engine_event;
 
-/// Configuration for a single matching engine shard (one instrument,
-/// or a fixed set of instruments depending on sharding strategy).
+/// Configuration for a single matching engine shard.
+/// /// Must match `risk_engine::shard::FANOUT_CAP` (private to that crate, so
+/// this value is kept in sync by hand — same pattern already used between
+/// `sequencer::ME_INBOUND_CAP` and this file's queue capacities).
+const RISK_FANOUT_CAP: usize = 1 << 14; // 16 384
+
 pub struct EngineConfig {
     pub limits: Tier0Limits,
     /// CPU core to pin this engine's hot thread to, if any.
     pub pin_core: Option<usize>,
 }
 
-/// Runtime state for one matching shard. Owns the order book and the
-/// risk state writer for accounts trading on this shard.
+/// Runtime state for one matching shard.
 pub struct MatchingEngine<W: WalWriter> {
     config: EngineConfig,
     book: OrderBook,
-    inbound: SpscConsumer<SequencedCommand, 1024>,
+    inbound: SpscConsumer<SequencedCommand, 4096>,
     outbound: SpscProducer<Event, 1024>,
+    risk_out: SpmcProducer<EngineEvent, RISK_FANOUT_CAP>,
     risk_states: Arc<AccountRiskTable>,
     wal: W,
     metrics: EngineMetrics,
@@ -48,8 +51,9 @@ impl<W: WalWriter> MatchingEngine<W> {
     pub fn new(
         config: EngineConfig,
         book: OrderBook,
-        inbound: SpscConsumer<SequencedCommand, 1024>,
+        inbound: SpscConsumer<SequencedCommand, 4096>,
         outbound: SpscProducer<Event, 1024>,
+        risk_out: SpmcProducer<EngineEvent, RISK_FANOUT_CAP>,
         risk_states: Arc<AccountRiskTable>,
         wal: W,
     ) -> Self {
@@ -58,6 +62,7 @@ impl<W: WalWriter> MatchingEngine<W> {
             book,
             inbound,
             outbound,
+            risk_out,
             risk_states,
             wal,
             metrics: EngineMetrics::new(),
@@ -92,6 +97,26 @@ impl<W: WalWriter> MatchingEngine<W> {
         }
     }
 
+    /// Best-effort fan-out of the raw `EngineEvent` to risk shards. Not
+    /// WAL-gated like `publish_and_log` (risk shards recompute state from
+    /// the seqlock table on recovery, not from this stream), so a full
+    /// queue only costs risk-shard visibility, not durability — spin
+    /// briefly, then drop + log rather than halt the engine.
+    fn publish_to_risk(&mut self, ev: EngineEvent) {
+        const MAX_RETRIES: u32 = 64;
+        let mut item = ev;
+        for _ in 0..MAX_RETRIES {
+            match self.risk_out.try_push(item) {
+                Ok(()) => return,
+                Err(rejected) => {
+                    item = rejected;
+                    std::hint::spin_loop();
+                }
+            }
+        }
+        logger::warn("matching-engine: risk fan-out ring full, dropping event");
+    }
+
     /// Process a single inbound command. Public for use by the
     /// deterministic simulation harness (`sim` crate), which drives the
     /// engine without a real ring buffer thread.
@@ -109,7 +134,6 @@ impl<W: WalWriter> MatchingEngine<W> {
                 order_type,
                 time_in_force,
             } => {
-                // Build a NewOrder-like struct for the risk check.
                 let new_order = core_types::NewOrder {
                     account_id: account,
                     instrument_id: core_types::InstrumentId(symbol.0.into()),
@@ -131,7 +155,7 @@ impl<W: WalWriter> MatchingEngine<W> {
                             state,
                             self.reference_price,
                         ),
-                        None => Err(RiskRejectReason::UnknownAccount), // or nearest existing variant
+                        None => Err(RiskRejectReason::UnknownAccount),
                     }
                 };
                 self.metrics.risk_check_latency.record(risk_start.elapsed());
@@ -142,10 +166,9 @@ impl<W: WalWriter> MatchingEngine<W> {
                         let mut n_fills: u64 = 0;
                         for ev in engine_events {
                             if let EngineEvent::Trade { price, .. } = &ev {
-                                // Update the reference price used by the price-band risk
-                                // check to the last traded price on this symbol.
                                 self.reference_price = Some(*price);
                             }
+                            self.publish_to_risk(ev.clone());
                             if let Some(out_ev) = map_engine_event(ev) {
                                 if matches!(out_ev, Event::Filled { .. }) {
                                     n_fills += 1;
@@ -157,7 +180,6 @@ impl<W: WalWriter> MatchingEngine<W> {
                     }
                     Err(reason) => {
                         self.metrics.record_order(0, true);
-                        // Build a Rejected event to publish
                         let seq_no = SequenceNo::new(cmd.seq).unwrap_or(SequenceNo::FIRST);
                         let ev = Event::Rejected {
                             seq: seq_no,
@@ -175,6 +197,7 @@ impl<W: WalWriter> MatchingEngine<W> {
             } => {
                 let events = self.book.apply(cmd);
                 for ev in events {
+                    self.publish_to_risk(ev.clone());
                     if let Some(out_ev) = map_engine_event(ev) {
                         self.publish_and_log(out_ev);
                     }
@@ -193,6 +216,7 @@ impl<W: WalWriter> MatchingEngine<W> {
                     };
                     let events = self.book.apply(cancel);
                     for ev in events {
+                        self.publish_to_risk(ev.clone());
                         if let Some(out_ev) = map_engine_event(ev) {
                             self.publish_and_log(out_ev);
                         }
@@ -276,8 +300,9 @@ mod tests {
     use wal::log::NullWal;
 
     fn mk_engine() -> MatchingEngine<NullWal> {
-        let (_in_tx, in_rx) = spsc_queue::<SequencedCommand, 1024>();
+        let (_in_tx, in_rx) = spsc_queue::<SequencedCommand, 4096>();
         let (out_tx, _out_rx) = spsc_queue::<Event, 1024>();
+        let (risk_tx, _risk_rx) = ring_buffer::spmc_queue::<EngineEvent, RISK_FANOUT_CAP>(1);
         let risk_state = Arc::new(AccountRiskTable::new(16));
 
         let book_cfg = BookConfig {
@@ -295,6 +320,7 @@ mod tests {
             OrderBook::new(book_cfg),
             in_rx,
             out_tx,
+            risk_tx,
             risk_state,
             NullWal::default(),
         )

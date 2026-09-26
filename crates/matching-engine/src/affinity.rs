@@ -1,4 +1,3 @@
-// Thread affinity and core pinning configuration
 //! CPU pinning helpers for the matching engine's hot thread.
 
 #[cfg(target_os = "linux")]

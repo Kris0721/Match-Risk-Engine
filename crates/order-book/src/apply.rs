@@ -1,4 +1,3 @@
-// Application of commands (e.g., limit, cancel) to the order book
 //! Pure state-transition layer for `OrderBook`.
 //!
 //! `OrderBook::apply()` is the single entry point called by the matching

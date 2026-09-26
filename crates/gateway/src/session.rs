@@ -15,8 +15,8 @@ use std::collections::HashMap;
 
 use bytes::{Buf, BufMut, BytesMut};
 use core_types::{
-    AccountId, CancelOrder, ClientOrderId, Command, Event, InstrumentId, NewOrder, OrderId,
-    OrderType, Price, Qty, Side, TimeInForce,
+    AccountId, CancelOrder, ClientOrderId, Command, CommandConversionError, Event, InboundCommand,
+    InstrumentId, NewOrder, OrderId, OrderType, Price, Qty, Side, TimeInForce,
 };
 use ring_buffer::SpscProducer;
 
@@ -51,6 +51,8 @@ pub enum SessionError {
     MalformedPayload { msg_type: u8, reason: &'static str },
     #[error("inbound command queue full")]
     QueueFull,
+    #[error("unsupported command: {0}")]
+    UnsupportedCommand(#[from] CommandConversionError),
 }
 
 /// Per-session state for one authenticated client connection.
@@ -61,7 +63,7 @@ pub struct Session {
     /// Producer side of the SPSC ring buffer feeding the sequencer.
     /// Each session gets a dedicated lane; the sequencer multiplexes
     /// across all sessions (see `sequencer/sequencer.rs`).
-    cmd_producer: SpscProducer<Command, 4096>,
+    cmd_producer: SpscProducer<InboundCommand, 4096>,
 
     /// Instruments this session is currently subscribed to for
     /// market data updates.
@@ -80,7 +82,7 @@ impl Session {
     pub fn new(
         id: SessionId,
         account_id: AccountId,
-        cmd_producer: SpscProducer<Command, 4096>,
+        cmd_producer: SpscProducer<InboundCommand, 4096>,
     ) -> Self {
         Session {
             id,
@@ -143,8 +145,9 @@ impl Session {
     }
 
     fn enqueue(&mut self, cmd: Command) -> Result<(), SessionError> {
+        let inbound = InboundCommand::try_from(cmd)?;
         self.cmd_producer
-            .try_push(cmd)
+            .try_push(inbound)
             .map_err(|_| SessionError::QueueFull)
     }
 
@@ -169,21 +172,44 @@ impl Session {
     /// care about (e.g. fills for orders belonging to other accounts,
     /// unless it's market data the session is subscribed to).
     pub fn encode_event(&self, ev: &Event, out: &mut BytesMut) -> Result<bool, CodecError> {
+        Self::encode_event_for(self.account_id, &self.codec, ev, out)
+    }
+
+    /// Same logic as `encode_event`, usable without an owned `Session` —
+    /// for the exec-report forwarding task in `server.rs`, which only has
+    /// the session's `account_id` (the `Session` itself is mutably
+    /// borrowed by the inbound-frame loop on the same connection).
+    pub fn encode_event_for(
+        account_id: AccountId,
+        codec: &Codec,
+        ev: &Event,
+        out: &mut BytesMut,
+    ) -> Result<bool, CodecError> {
         match ev {
-            Event::Accepted { account_id, .. }
-            | Event::Canceled { account_id, .. }
-            | Event::Rejected { account_id, .. }
-            | Event::Modified { account_id, .. }
-                if *account_id == self.account_id =>
-            {
-                encode_exec_report(ev, &self.codec, out)?;
+            Event::Accepted {
+                account_id: ev_acct,
+                ..
+            }
+            | Event::Canceled {
+                account_id: ev_acct,
+                ..
+            }
+            | Event::Rejected {
+                account_id: ev_acct,
+                ..
+            }
+            | Event::Modified {
+                account_id: ev_acct,
+                ..
+            } if *ev_acct == account_id => {
+                encode_exec_report(ev, codec, out)?;
                 Ok(true)
             }
             Event::Filled { fill, .. }
-                if fill.aggressor_account_id == self.account_id
-                    || fill.resting_account_id == self.account_id =>
+                if fill.aggressor_account_id == account_id
+                    || fill.resting_account_id == account_id =>
             {
-                encode_exec_report(ev, &self.codec, out)?;
+                encode_exec_report(ev, codec, out)?;
                 Ok(true)
             }
             _ => Ok(false),
@@ -214,7 +240,7 @@ pub enum SessionAction {
 //   u64 qty
 //   u8  time_in_force (0 = GTC, 1 = IOC, 2 = FOK)
 
-fn decode_new_order(account_id: AccountId, payload: &[u8]) -> Result<NewOrder, SessionError> {
+pub fn decode_new_order(account_id: AccountId, payload: &[u8]) -> Result<NewOrder, SessionError> {
     const EXPECTED_LEN: usize = 8 + 8 + 1 + 1 + 8 + 8 + 1;
     if payload.len() != EXPECTED_LEN {
         return Err(SessionError::MalformedPayload {
@@ -285,7 +311,10 @@ fn decode_new_order(account_id: AccountId, payload: &[u8]) -> Result<NewOrder, S
 /// `CANCEL_ORDER` payload layout:
 ///   u64 instrument_id
 ///   u64 order_id
-fn decode_cancel_order(account_id: AccountId, payload: &[u8]) -> Result<CancelOrder, SessionError> {
+pub fn decode_cancel_order(
+    account_id: AccountId,
+    payload: &[u8],
+) -> Result<CancelOrder, SessionError> {
     const EXPECTED_LEN: usize = 8 + 8;
     if payload.len() != EXPECTED_LEN {
         return Err(SessionError::MalformedPayload {
@@ -328,7 +357,11 @@ fn decode_instrument_id(payload: &[u8]) -> Result<InstrumentId, SessionError> {
 // variant 3: Rejected   { client_order_id: u64, reason: u8 }
 // variant 4: Modified   { order_id: u64, new_qty: u64, has_new_price: u8, new_price: i64 }
 
-fn encode_exec_report(ev: &Event, codec: &Codec, out: &mut BytesMut) -> Result<(), CodecError> {
+pub(crate) fn encode_exec_report(
+    ev: &Event,
+    codec: &Codec,
+    out: &mut BytesMut,
+) -> Result<(), CodecError> {
     let mut payload = BytesMut::new();
 
     match ev {
@@ -451,8 +484,11 @@ mod tests {
     use core_types::{AccountId, ClientOrderId, InstrumentId, OrderId, Price, Qty, Side};
     use ring_buffer::spsc;
 
-    fn make_session() -> (Session, ring_buffer::spsc::SpscConsumer<Command, 4096>) {
-        let (producer, consumer) = spsc::spsc_queue::<Command, 4096>();
+    fn make_session() -> (
+        Session,
+        ring_buffer::spsc::SpscConsumer<InboundCommand, 4096>,
+    ) {
+        let (producer, consumer) = spsc::spsc_queue::<InboundCommand, 4096>();
         let session = Session::new(SessionId(1), AccountId::new(42), producer);
         (session, consumer)
     }
@@ -493,14 +529,24 @@ mod tests {
 
         let cmd = consumer.try_pop().expect("command enqueued");
         match cmd {
-            Command::New(n) => {
-                assert_eq!(n.account_id, AccountId::new(42));
-                assert_eq!(n.instrument_id, InstrumentId::new(1));
-                assert_eq!(n.client_order_id, ClientOrderId::new(7));
-                assert_eq!(n.side, Side::Buy);
-                assert_eq!(n.qty, Qty::new(5));
-                assert_eq!(n.order_type, core_types::OrderType::Limit);
-                assert_eq!(n.price, Price::new(10_050));
+            InboundCommand::NewOrder {
+                account,
+                client_order_id,
+                symbol,
+                side,
+                qty,
+                order_type,
+                price,
+                time_in_force,
+                ..
+            } => {
+                assert_eq!(account, AccountId::new(42));
+                assert_eq!(symbol, core_types::Symbol(1));
+                assert_eq!(client_order_id, ClientOrderId::new(7));
+                assert_eq!(side, Side::Buy);
+                assert_eq!(qty, Qty::new(5));
+                assert_eq!(order_type, core_types::OrderType::Limit);
+                assert_eq!(price, Price::new(10_050));
             }
             _ => panic!("expected limit order"),
         }
