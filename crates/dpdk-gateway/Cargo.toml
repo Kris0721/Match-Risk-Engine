@@ -12,7 +12,15 @@ gateway = { path = "../gateway" }
 dpdk-sys = { version = "0.1", optional = true }
 thiserror = "1"
 libc = "0.2"
+bytes = "1"
 
 [features]
 default = []
-dpdk = []
+# Real DPDK kernel-bypass I/O. Requires a Linux host with DPDK's userspace
+# libraries installed and a UIO/VFIO-bound NIC — this cannot build+link on
+# Windows or macOS, or on a Linux box without DPDK, regardless of whether
+# the Rust code itself compiles. `dpdk-sys` here is unmaintained bindings
+# generated against DPDK 17.02/18.05 (crates.io, last touched ~2018) — it
+# will very likely need forking/patching against whatever DPDK version you
+# actually target. Nothing in CI should pass this flag.
+dpdk = ["dep:dpdk-sys"]

@@ -5,20 +5,26 @@
 //! - `Copy`-able, cache-friendly small types for hot-path use.
 //! - Zero allocation on the matching hot path.
 
-pub mod price;
-pub mod qty;
-pub mod ids;
-pub mod side;
+pub mod clock;
 pub mod commands;
 pub mod events;
-pub mod order_status;
+pub mod ids;
 pub mod log_entry;
+pub mod order_status;
+pub mod price;
+pub mod qty;
+pub mod side;
 
+pub use commands::{
+    CancelOrder, Command, CommandConversionError, InboundCommand, NewOrder, OrderType,
+    SequencedCommand, TimeInForce,
+};
+pub use events::{CancelReason, EngineEvent, Event, RejectReason};
+pub use ids::{
+    AccountId, ClientOrderId, InstrumentId, OrderId, SequenceNo, Symbol, SymbolRangeError,
+};
+pub use log_entry::LogEntry;
+pub use order_status::OrderStatus;
 pub use price::Price;
 pub use qty::Qty;
-pub use ids::{OrderId, AccountId, InstrumentId, SequenceNo, ClientOrderId, Symbol};
 pub use side::Side;
-pub use commands::{Command, InboundCommand, SequencedCommand, NewOrder, CancelOrder, OrderType, TimeInForce};
-pub use events::{Event, EngineEvent, RejectReason, CancelReason};
-pub use order_status::OrderStatus;
-pub use log_entry::LogEntry;

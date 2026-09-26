@@ -170,7 +170,6 @@ impl RoleHandle {
     /// A handle permanently pinned to `Leader`, for unit tests that don't
     /// exercise the election machinery itself. Not for production use —
     /// this bypasses lease acquisition entirely.
-    #[cfg(test)]
     pub fn for_test_leader() -> Self {
         Self {
             role: Arc::new(AtomicU8::new(Role::Leader as u8)),

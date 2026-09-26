@@ -1,4 +1,3 @@
-// Single-Producer Multi-Consumer ring buffer
 //! Single-Producer Multi-Consumer ring buffer (broadcast / fan-out).
 //!
 //! # Design
@@ -21,15 +20,15 @@
 //! engine the producer **must never stall**, so ensure consumers are fast enough
 //! or `CAP` is large enough to absorb bursts.
 
-#[cfg(not(feature = "loom"))]
-use std::sync::atomic::{AtomicUsize, Ordering};
 #[cfg(feature = "loom")]
 use loom::sync::atomic::{AtomicUsize, Ordering};
-
 #[cfg(not(feature = "loom"))]
-use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 #[cfg(feature = "loom")]
 use loom::sync::Arc;
+#[cfg(not(feature = "loom"))]
+use std::sync::Arc;
 
 use std::cell::{Cell, UnsafeCell};
 use std::mem::MaybeUninit;
@@ -50,6 +49,7 @@ unsafe impl<T: Send, const CAP: usize> Send for Shared<T, CAP> {}
 unsafe impl<T: Send, const CAP: usize> Sync for Shared<T, CAP> {}
 
 impl<T, const CAP: usize> Shared<T, CAP> {
+    #[cfg(feature = "loom")]
     fn new(n_consumers: usize) -> Self {
         assert!(CAP.is_power_of_two(), "CAP must be a power of two");
         let slots = unsafe {
@@ -66,6 +66,30 @@ impl<T, const CAP: usize> Shared<T, CAP> {
             head: CachePadded::new(AtomicUsize::new(0)),
             consumer_tails,
             slots,
+        }
+    }
+
+    #[cfg(feature = "loom")]
+    fn new_arc(n_consumers: usize) -> Arc<Self> {
+        Arc::new(Self::new(n_consumers))
+    }
+
+    #[cfg(not(feature = "loom"))]
+    fn new_arc(n_consumers: usize) -> Arc<Self> {
+        assert!(CAP.is_power_of_two(), "CAP must be a power of two");
+        let consumer_tails: Vec<Arc<CachePadded<AtomicUsize>>> = (0..n_consumers)
+            .map(|_| Arc::new(CachePadded::new(AtomicUsize::new(0))))
+            .collect();
+        // Same reasoning as spsc.rs's `Shared::new_arc`: build `slots`
+        // directly on the heap rather than as a stack temporary.
+        unsafe {
+            let mut arc: Arc<std::mem::MaybeUninit<Self>> = Arc::new_uninit();
+            let ptr = Arc::get_mut(&mut arc)
+                .expect("no other Arc clone can exist yet")
+                .as_mut_ptr();
+            std::ptr::addr_of_mut!((*ptr).head).write(CachePadded::new(AtomicUsize::new(0)));
+            std::ptr::addr_of_mut!((*ptr).consumer_tails).write(consumer_tails);
+            arc.assume_init()
         }
     }
 
@@ -102,14 +126,13 @@ pub struct SpmcConsumer<T, const CAP: usize> {
     cached_tail: usize,
 }
 
-
 /// Create an SPMC queue with `n_consumers` independent consumer cursors.
 ///
 /// Returns the producer and a `Vec` of consumers (one per cursor).
 pub fn spmc_queue<T, const CAP: usize>(
     n_consumers: usize,
 ) -> (SpmcProducer<T, CAP>, Vec<SpmcConsumer<T, CAP>>) {
-    let shared = Arc::new(Shared::new(n_consumers));
+    let shared = Shared::new_arc(n_consumers);
 
     let consumers = shared
         .consumer_tails
@@ -151,7 +174,9 @@ impl<T: Clone, const CAP: usize> SpmcProducer<T, CAP> {
             (*self.shared.slots[slot].get()).write(item);
         }
 
-        self.shared.head.store(head.wrapping_add(1), Ordering::Release);
+        self.shared
+            .head
+            .store(head.wrapping_add(1), Ordering::Release);
         self.cached_head = head.wrapping_add(1);
         Ok(())
     }

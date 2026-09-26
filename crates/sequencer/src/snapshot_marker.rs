@@ -1,4 +1,4 @@
-// Sequencing logic for marking snapshot points
+
 //! Snapshot marker injection schedule.
 //!
 //! The Sequencer periodically injects a `SnapshotMarker` system event into

@@ -1,4 +1,3 @@
-// Risk parameters and tier rules config
 //! Per-account-tier risk limits, hot-reloadable at runtime.
 //!
 //! `RiskConfig` is intentionally a plain `Copy` struct so it can be read from

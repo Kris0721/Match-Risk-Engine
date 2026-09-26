@@ -1,5 +1,7 @@
 ﻿// Input commands for the matching risk engine
-use crate::{AccountId, ClientOrderId, InstrumentId, OrderId, Price, Qty, Side, Symbol};
+use crate::{
+    AccountId, ClientOrderId, InstrumentId, OrderId, Price, Qty, Side, Symbol, SymbolRangeError,
+};
 
 /// Time-in-force qualifier for new orders.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -75,9 +77,13 @@ pub enum Command {
     Cancel(CancelOrder),
     Modify(ModifyOrder),
     /// Administrative: halt trading on an instrument (see `sequencer/halt.rs`).
-    Halt { instrument_id: InstrumentId },
+    Halt {
+        instrument_id: InstrumentId,
+    },
     /// Administrative: resume trading on an instrument.
-    Resume { instrument_id: InstrumentId },
+    Resume {
+        instrument_id: InstrumentId,
+    },
 }
 
 impl Command {
@@ -124,22 +130,82 @@ pub enum InboundCommand {
         qty: Qty,
         order_type: OrderType,
         time_in_force: TimeInForce,
-    }, 
+    },
     Cancel {
         account: AccountId,
         order_id: OrderId,
     },
     /// Privileged command emitted by the risk engine to liquidate an
     /// account's position on a given symbol.
-    Liquidate {
-        symbol: Symbol,
-        account: AccountId,
-    },
+    Liquidate { symbol: Symbol, account: AccountId },
     /// Privileged command emitted by the risk engine to freeze an
     /// account (halt all new orders).
-    FreezeAccount {
-        account: AccountId,
-    },
+    FreezeAccount { account: AccountId },
+}
+
+/// Error converting a wire-protocol `Command` into the sequencer-internal
+/// `InboundCommand`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandConversionError {
+    /// `Modify` has no `InboundCommand` counterpart yet — matching-engine
+    /// modify/replace isn't implemented (see gap-analysis report). Reject
+    /// at the boundary instead of silently dropping it.
+    ModifyNotSupported,
+    /// `Halt` / `Resume` are administrative and already travel out-of-band
+    /// via `sequencer::halt::GlobalHalt`, not through the command queue.
+    AdminCommandNotQueued,
+    /// The command's `InstrumentId` doesn't fit in the sequencer's
+    /// `Symbol(u16)` routing space.
+    SymbolOutOfRange(SymbolRangeError),
+}
+
+impl std::fmt::Display for CommandConversionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ModifyNotSupported => write!(f, "Modify has no InboundCommand equivalent yet"),
+            Self::AdminCommandNotQueued => {
+                write!(
+                    f,
+                    "Halt/Resume are dispatched out-of-band, not via the command queue"
+                )
+            }
+            Self::SymbolOutOfRange(e) => write!(f, "{e}"),
+        }
+    }
+}
+impl std::error::Error for CommandConversionError {}
+
+impl From<SymbolRangeError> for CommandConversionError {
+    fn from(e: SymbolRangeError) -> Self {
+        Self::SymbolOutOfRange(e)
+    }
+}
+
+impl TryFrom<Command> for InboundCommand {
+    type Error = CommandConversionError;
+
+    fn try_from(cmd: Command) -> Result<Self, Self::Error> {
+        Ok(match cmd {
+            Command::New(n) => InboundCommand::NewOrder {
+                account: n.account_id,
+                client_order_id: n.client_order_id,
+                symbol: Symbol::try_from(n.instrument_id)?,
+                side: n.side,
+                price: n.price,
+                qty: n.qty,
+                order_type: n.order_type,
+                time_in_force: n.time_in_force,
+            },
+            Command::Cancel(c) => InboundCommand::Cancel {
+                account: c.account_id,
+                order_id: c.order_id,
+            },
+            Command::Modify(_) => return Err(CommandConversionError::ModifyNotSupported),
+            Command::Halt { .. } | Command::Resume { .. } => {
+                return Err(CommandConversionError::AdminCommandNotQueued)
+            }
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -172,7 +238,9 @@ mod tests {
         assert_eq!(cmd.instrument_id(), Some(InstrumentId::new(7)));
         assert_eq!(cmd.account_id(), Some(AccountId::new(1)));
 
-        let halt = Command::Halt { instrument_id: InstrumentId::new(3) };
+        let halt = Command::Halt {
+            instrument_id: InstrumentId::new(3),
+        };
         assert_eq!(halt.instrument_id(), Some(InstrumentId::new(3)));
         assert_eq!(halt.account_id(), None);
     }
@@ -184,5 +252,3 @@ mod tests {
         assert_eq!(cmd, cmd2);
     }
 }
-
-

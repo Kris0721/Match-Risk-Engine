@@ -31,13 +31,13 @@
 //! ever sees one symbol) so, like the deterministic sim harness, they are
 //! broadcast to every book this worker owns.
 
+use core_types::clock::Clock;
+use crossbeam_channel::Receiver;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::Instant;
-
-use crossbeam_channel::Receiver;
 
 use core_types::commands::{InboundCommand, SequencedCommand};
 use core_types::events::EngineEvent;
@@ -111,10 +111,12 @@ impl SecondEngine {
     /// local order books.
     ///
     /// `pending_ring` is used to remove entries after processing.
+
     pub fn start(
         config: SecondEngineConfig,
         work_rx: Receiver<Arc<LogEntry>>,
         pending_ring: Arc<PendingRing>,
+        clock: Arc<dyn Clock>,
     ) -> Self {
         let metrics = Arc::new(SecondEngineMetrics::default());
         let mut workers = Vec::with_capacity(config.worker_count);
@@ -124,11 +126,12 @@ impl SecondEngine {
             let ring = Arc::clone(&pending_ring);
             let m = Arc::clone(&metrics);
             let books = build_books(&config.book_configs);
+            let clk = Arc::clone(&clock);
 
             let handle = thread::Builder::new()
                 .name(format!("second-engine-worker-{}", worker_id))
                 .spawn(move || {
-                    Self::worker_loop(worker_id, rx, ring, m, books);
+                    Self::worker_loop(worker_id, rx, ring, m, books, clk);
                 })
                 .expect("Failed to spawn second engine worker thread");
 
@@ -149,29 +152,23 @@ impl SecondEngine {
         pending_ring: Arc<PendingRing>,
         metrics: Arc<SecondEngineMetrics>,
         mut books: HashMap<Symbol, OrderBook>,
+        clock: Arc<dyn Clock>,
     ) {
-        let clock = Instant::now();
-
         while let Ok(entry) = work_rx.recv() {
             metrics.orders_received.fetch_add(1, Ordering::Relaxed);
 
-            // Step 1: Atomic read — confirm still Unaddressed.
-            // (Primary may have grabbed it after Sorter escalated.)
             let status = entry.load_status();
             if status != OrderStatus::Unaddressed {
                 metrics.cas_failures.fetch_add(1, Ordering::Relaxed);
-                continue; // Primary got it — skip
+                continue;
             }
 
-            // Step 2: Atomic CAS claim.
             if !entry.try_claim(OrderStatus::Unaddressed, OrderStatus::FinallyHandled) {
                 metrics.cas_failures.fetch_add(1, Ordering::Relaxed);
-                continue; // Another worker got it — skip
+                continue;
             }
 
-            // Step 3: We own this order — match it against our local
-            // book(s) using the original inbound command from Log B.
-            let now_ns = clock.elapsed().as_nanos() as u64;
+            let now_ns = clock.now_ns();
             let (fill_price, filled_qty, matched_known_symbol) =
                 apply_escalated(&entry, &mut books);
 
@@ -179,17 +176,11 @@ impl SecondEngine {
                 metrics.unknown_symbol.fetch_add(1, Ordering::Relaxed);
             }
 
-            entry.record_fill(
-                2, // handled_by = secondary
-                now_ns, fill_price, filled_qty,
-            );
-
-            // Step 4: Remove from pending ring.
+            entry.record_fill(2, now_ns, fill_price, filled_qty);
             pending_ring.remove(entry.seq);
 
             metrics.orders_processed.fetch_add(1, Ordering::Relaxed);
         }
-        // Channel disconnected — Sorter has shut down.
     }
 
     /// Get the shared metrics.
@@ -431,7 +422,13 @@ mod tests {
             worker_count: 2,
             book_configs: test_book_configs(),
         };
-        let engine = SecondEngine::start(config, rx, Arc::clone(&ring));
+
+        let engine = SecondEngine::start(
+            config,
+            rx,
+            Arc::clone(&ring),
+            Arc::new(core_types::clock::MonotonicClock::new()),
+        );
 
         // Create and escalate 10 entries
         for i in 1..=10 {

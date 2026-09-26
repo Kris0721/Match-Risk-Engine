@@ -61,39 +61,11 @@ impl SequencerConfig {
     }
 }
 
+pub use core_types::clock::{Clock, MonotonicClock};
 /// Hardware or monotonic timestamp source.
 ///
 /// Abstracted so the simulation harness can inject a deterministic clock
-/// instead of reading the real TSC.
-pub trait Clock: Send + 'static {
-    fn now_ns(&self) -> u64;
-}
-
-/// Default clock: reads `CLOCK_MONOTONIC` via `std::time`.
-pub struct MonotonicClock {
-    origin: std::time::Instant,
-}
-
-impl MonotonicClock {
-    pub fn new() -> Self {
-        Self {
-            origin: std::time::Instant::now(),
-        }
-    }
-}
-
-impl Clock for MonotonicClock {
-    #[inline]
-    fn now_ns(&self) -> u64 {
-        self.origin.elapsed().as_nanos() as u64
-    }
-}
-
-impl Default for MonotonicClock {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+/// instead of reading the real TS
 
 /// The Sequencer owns all its queues and drives the main loop.
 pub struct Sequencer<C: Clock> {

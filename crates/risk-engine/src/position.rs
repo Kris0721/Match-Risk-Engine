@@ -1,4 +1,3 @@
-// Account positions and margin balance tracking
 //! Per-account, per-symbol position tracking.
 //!
 //! All arithmetic is integer fixed-point (same scale as `Price` / `Qty`).
