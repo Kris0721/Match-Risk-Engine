@@ -1,21 +1,3 @@
-//! Standalone latency-percentile harness for the order book hot path.
-//!
-//! Unlike the criterion suite (`benches/matching_bench.rs`), which reports
-//! mean/median/bootstrap-CI statistics tuned for regression detection,
-//! this harness records the wall-clock latency of *every individual*
-//! operation into an HDR histogram and reports the exact percentiles that
-//! matter for a latency-sensitive system: p50, p90, p99, p99.9, p99.99,
-//! and max.
-//!
-//! Run with:
-//!   cargo run --release --example latency_report -p order-book
-//!
-//! Always use `--release`. A debug build's per-op latency is dominated by
-//! missing inlining/bounds-check elision, not the thing being measured.
-//!
-//! See `LATENCY_METHODOLOGY.md` alongside this file for what each number
-//! does and does not claim, and the caveats around measurement overhead.
-
 use std::time::Instant;
 
 use hdrhistogram::Histogram;
@@ -48,6 +30,7 @@ fn make_book(capacity: usize) -> OrderBook {
 
 fn seq_cmd(seq: u64, cmd: InboundCommand) -> SequencedCommand {
     SequencedCommand {
+        term: 1,
         seq,
         ts_ns: seq * 1_000,
         cmd,

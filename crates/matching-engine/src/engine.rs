@@ -45,6 +45,7 @@ pub struct MatchingEngine<W: WalWriter> {
     metrics: EngineMetrics,
     reference_price: Option<Price>,
     running: bool,
+    highest_term_seen: u64,
 }
 
 impl<W: WalWriter> MatchingEngine<W> {
@@ -68,6 +69,7 @@ impl<W: WalWriter> MatchingEngine<W> {
             metrics: EngineMetrics::new(),
             reference_price: None,
             running: true,
+            highest_term_seen: 0,
         }
     }
 
@@ -121,6 +123,10 @@ impl<W: WalWriter> MatchingEngine<W> {
     /// deterministic simulation harness (`sim` crate), which drives the
     /// engine without a real ring buffer thread.
     pub fn handle_command(&mut self, cmd: SequencedCommand) {
+        if cmd.term < self.highest_term_seen {
+            logger::warn("matching-engine: dropping stale-term command (zombie leader)");
+            return;
+        }
         let start = Instant::now();
 
         match cmd.cmd {
@@ -204,12 +210,10 @@ impl<W: WalWriter> MatchingEngine<W> {
                 }
             }
             InboundCommand::Liquidate { account, .. } => {
-                // Cancel every resting order for this account, then let the
-                // caller (risk shard) handle the actual position/margin unwind —
-                // this engine's job is just to pull all liquidity off the book.
                 let order_ids = self.book.open_order_ids_for_account(account);
                 for order_id in order_ids {
                     let cancel = SequencedCommand {
+                        term: cmd.term,
                         seq: cmd.seq,
                         ts_ns: cmd.ts_ns,
                         cmd: InboundCommand::Cancel { account, order_id },
@@ -224,13 +228,6 @@ impl<W: WalWriter> MatchingEngine<W> {
                 }
             }
             InboundCommand::FreezeAccount { account } => {
-                // Administrative freeze, distinct from risk-engine's
-                // automatic margin-breach freeze — both write the same
-                // `frozen` flag on the shared seqlock state, so either
-                // source is picked up by `risk_check::check_new_order`.
-                // There is no corresponding "unfreeze" command yet — that's
-                // a separate gap (same class as risk-engine's
-                // deposit-only, no-withdrawal limitation).
                 match self.risk_states.get(account.get()) {
                     Some(state) => state.set_frozen(true),
                     None => logger::warn(&format!(
@@ -340,6 +337,7 @@ mod tests {
         let mut engine = mk_engine();
 
         let seq_cmd = SequencedCommand {
+            term: 1,
             seq: 1,
             ts_ns: 0,
             cmd: InboundCommand::NewOrder {
@@ -366,6 +364,7 @@ mod tests {
         let mut engine = mk_engine();
 
         let resting = SequencedCommand {
+            term: 1,
             seq: 1,
             ts_ns: 0,
             cmd: InboundCommand::NewOrder {
@@ -382,6 +381,7 @@ mod tests {
         engine.handle_command(resting);
 
         let aggressor = SequencedCommand {
+            term: 1,
             seq: 2,
             ts_ns: 0,
             cmd: InboundCommand::NewOrder {
@@ -419,6 +419,7 @@ mod tests {
             .set_halted(true);
 
         let halted_account_order = SequencedCommand {
+            term: 1,
             seq: 1,
             ts_ns: 0,
             cmd: InboundCommand::NewOrder {
@@ -435,6 +436,7 @@ mod tests {
         engine.handle_command(halted_account_order);
 
         let other_account_order = SequencedCommand {
+            term: 1,
             seq: 2,
             ts_ns: 0,
             cmd: InboundCommand::NewOrder {

@@ -24,6 +24,7 @@ fn make_book(capacity: usize) -> OrderBook {
 
 fn seq_cmd(seq: u64, cmd: InboundCommand) -> SequencedCommand {
     SequencedCommand {
+        term: 1,
         seq,
         ts_ns: seq * 1_000,
         cmd,

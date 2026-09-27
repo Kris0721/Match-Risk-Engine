@@ -136,31 +136,18 @@ impl SimEngine {
 pub struct SimHarness {
     pub config: SimConfig,
     pub clock: SimClock,
-
-    // --- Sequencer state ---
     next_seq: u64,
-    /// Commands waiting to be sequenced (arrive from the test / scenario).
     inbound: VecDeque<InboundCommand>,
-    /// Sequenced commands routed to each matching engine.
     me_queues: Vec<VecDeque<SequencedCommand>>,
-    /// WAL log of every sequenced command (in-memory for the sim).
+    current_term: u64,
+
     pub wal: Vec<SequencedCommand>,
-
-    // --- Matching engines (one per symbol) ---
     engines: Vec<SimEngine>,
-    /// Events emitted by matching engines, waiting to be consumed by
-    /// risk shards and other subscribers.
     event_queue: VecDeque<EngineEvent>,
-
-    // --- Risk shards ---
     shards: Vec<RiskShard>,
     mark_prices: MarkPrices,
 
-    // --- Account risk states (shared via seqlock in production) ---
-    /// In the sim these live here for easy inspection.
     pub account_states: Arc<AccountRiskTable>,
-
-    /// Snapshot interval (in sequenced commands).
     snapshot_interval: u64,
 }
 
@@ -212,6 +199,7 @@ impl SimHarness {
             mark_prices: HashMap::new(),
             account_states,
             snapshot_interval: config.snapshot_interval,
+            current_term: 1,
             config,
         }
     }
@@ -219,6 +207,10 @@ impl SimHarness {
     /// Inject a command into the inbound queue (called by scenarios / fuzzers).
     pub fn push_command(&mut self, cmd: InboundCommand) {
         self.inbound.push_back(cmd);
+    }
+
+    pub fn set_term(&mut self, term: u64) {
+        self.current_term = term;
     }
 
     /// Set a mark price for a symbol (used by risk shards for margin calculation).
@@ -241,6 +233,7 @@ impl SimHarness {
                 let ts_ns = self.clock.now_ns();
 
                 let sequenced = SequencedCommand {
+                    term: self.current_term,
                     seq,
                     ts_ns,
                     cmd: cmd.clone(),

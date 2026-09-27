@@ -194,8 +194,10 @@ impl<C: Clock> Sequencer<C> {
         self.seq = self.seq.wrapping_add(1);
         let seq = self.seq;
         let ts_ns = self.clock.now_ns();
+        let term = self.role.term();
 
         let sequenced = SequencedCommand {
+            term,
             seq,
             ts_ns,
             cmd: cmd.clone(),

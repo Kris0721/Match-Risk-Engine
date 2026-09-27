@@ -211,6 +211,7 @@ impl SecondEngine {
 ///   this worker has no book for (nothing was applied in that case).
 fn apply_escalated(entry: &LogEntry, books: &mut HashMap<Symbol, OrderBook>) -> (u64, u64, bool) {
     let seq_cmd = SequencedCommand {
+        term: entry.term,
         seq: entry.seq,
         ts_ns: entry.timestamp_in,
         cmd: entry.cmd.clone(),
@@ -239,6 +240,7 @@ fn apply_escalated(entry: &LogEntry, books: &mut HashMap<Symbol, OrderBook>) -> 
                 let order_ids = book.open_order_ids_for_account(*account);
                 for order_id in order_ids {
                     let cancel = SequencedCommand {
+                        term: seq_cmd.term,
                         seq: seq_cmd.seq,
                         ts_ns: seq_cmd.ts_ns,
                         cmd: InboundCommand::Cancel {
@@ -340,6 +342,7 @@ mod tests {
     fn sample_entry(seq: u64, side: Side, price: i64) -> Arc<LogEntry> {
         Arc::new(LogEntry::new(
             seq,
+            1,
             0,
             InboundCommand::NewOrder {
                 account: AccountId(1),
@@ -357,6 +360,7 @@ mod tests {
     fn sample_entry_for_account(seq: u64, side: Side, price: i64, account: u64) -> Arc<LogEntry> {
         Arc::new(LogEntry::new(
             seq,
+            1,
             0,
             InboundCommand::NewOrder {
                 account: AccountId(account),
