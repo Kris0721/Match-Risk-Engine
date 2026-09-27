@@ -1,45 +1,3 @@
-//! Lock-free structure holding only pending orders for O(log n) Sorter scanning.
-//!
-//! # Design (Architecture Doc §6, Optimization 2)
-//!
-//! Instead of the Sorter scanning the entire log (O(n)), it scans only this
-//! structure, which contains at most the orders currently in-flight. At
-//! steady state this is ~100-500 entries.
-//!
-//! # Thread safety
-//!
-//! - **Push**: called by the DualLog writer thread after dual-write succeeds
-//!   (single producer).
-//! - **Remove**: called concurrently by every Second Engine worker thread
-//!   AND the Sorter thread — this is genuinely multi-writer, keyed by `seq`.
-//! - **Iter / next_pending / snapshot**: called by the Sorter thread.
-//!
-//! # Why a concurrent skip list, not a hand-rolled structure
-//!
-//! Earlier revision used `Mutex<VecDeque>`. `remove()` is called from
-//! multiple Second Engine worker threads plus the Sorter thread
-//! concurrently, targeting arbitrary `seq` keys — this is a concurrent
-//! keyed-removal set, not a queue. A hand-rolled lock-free version of that
-//! (skip list or linked list with manual memory reclamation) needs a
-//! correct epoch-based reclamation scheme to avoid use-after-free when one
-//! thread reads an `Arc` while another physically unlinks and frees the
-//! node; getting that subtly wrong is real, hard-to-detect undefined
-//! behavior. `crossbeam-skiplist` provides exactly this — a lock-free,
-//! epoch-reclaimed concurrent map — and is already in the same crate
-//! family (`crossbeam-*`) used elsewhere in this workspace.
-//!
-//! `seq` is monotonically increasing (assigned once by the sequencer) and
-//! is the map key, so the skip list's sorted iteration order preserves the
-//! same FIFO order the old `VecDeque` gave for free.
-//!
-//! `len()` is tracked with a separate `AtomicUsize` rather than
-//! `SkipMap::len()` (which is O(n), a full traversal) so the hot-path
-//! `is_empty()`/`len()` calls stay O(1). This counter is only
-//! eventually-consistent with the map under concurrent push/remove — a
-//! reader can observe it momentarily stale — but that is no weaker a
-//! guarantee than the old mutex version gave the instant after the lock
-//! was released, so no caller-visible behavior changes.
-
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
@@ -48,19 +6,8 @@ use crossbeam_skiplist::SkipMap;
 use core_types::log_entry::LogEntry;
 use core_types::order_status::OrderStatus;
 
-/// Default capacity for the pending ring buffer (64K slots).
-///
-/// The skip list itself grows dynamically and does not enforce this as a
-/// hard cap — it is kept here for API compatibility with the previous
-/// fixed-capacity ring and as the intended steady-state sizing hint.
 const DEFAULT_CAPACITY: usize = 65536;
 
-/// A lock-free, thread-safe structure holding only pending (in-flight)
-/// log entries, keyed by sequence number.
-///
-/// Orders are pushed when they enter the system and removed when they are
-/// fully processed (Addressed or FinallyHandled). The Sorter scans this
-/// structure to find orders that need escalation.
 pub struct PendingRing {
     map: SkipMap<u64, Arc<LogEntry>>,
     len: AtomicUsize,
@@ -72,9 +19,6 @@ impl PendingRing {
         Self::with_capacity(DEFAULT_CAPACITY)
     }
 
-    /// Create a new `PendingRing`. `_capacity` is retained for API
-    /// compatibility with the previous fixed-capacity ring; the
-    /// underlying skip list grows dynamically and does not pre-allocate.
     pub fn with_capacity(_capacity: usize) -> Self {
         Self {
             map: SkipMap::new(),
@@ -82,24 +26,12 @@ impl PendingRing {
         }
     }
 
-    /// Push a new pending entry.
-    ///
-    /// Called by the DualLog after a successful dual-write. Single
-    /// producer in practice, but `SkipMap::insert` is safe under
-    /// concurrent callers regardless.
     pub fn push(&self, entry: Arc<LogEntry>) {
         let seq = entry.seq;
         self.map.insert(seq, entry);
         self.len.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Remove the entry with the given sequence number.
-    ///
-    /// Called concurrently by Second Engine workers (after CAS claim) and
-    /// the Sorter (after escalation). Returns `true` if the entry was
-    /// found and removed by *this* call — `SkipMap::remove` guarantees
-    /// exactly one racing caller wins for a given key, so this remains a
-    /// safe, idempotent "did I remove it" check under contention.
     pub fn remove(&self, seq: u64) -> bool {
         if self.map.remove(&seq).is_some() {
             self.len.fetch_sub(1, Ordering::Relaxed);
@@ -109,10 +41,6 @@ impl PendingRing {
         }
     }
 
-    /// Get the next pending entry (status == Pending) without removing it.
-    ///
-    /// O(n) worst case (skip-list iteration), same asymptotic cost as the
-    /// previous `VecDeque` version. Returns a clone of the `Arc`.
     pub fn next_pending(&self) -> Option<Arc<LogEntry>> {
         self.map
             .iter()
@@ -120,11 +48,6 @@ impl PendingRing {
             .map(|e| e.value().clone())
     }
 
-    /// Return a snapshot of all entries currently present, in `seq` order.
-    ///
-    /// Used by the Sorter to scan all in-flight orders. The returned `Vec`
-    /// is a snapshot — entries may change status between snapshot and
-    /// processing, which is safe because all transitions use CAS.
     pub fn snapshot(&self) -> Vec<Arc<LogEntry>> {
         self.map.iter().map(|e| e.value().clone()).collect()
     }
@@ -140,13 +63,6 @@ impl PendingRing {
         self.len() == 0
     }
 
-    /// Remove all entries whose status is terminal (Addressed or
-    /// FinallyHandled).
-    ///
-    /// Called periodically by the Sorter to keep the structure small.
-    /// Returns the number of entries removed. Two-pass (collect terminal
-    /// keys, then remove) rather than removing while iterating, since
-    /// `SkipMap`'s iterator does not support removal during traversal.
     pub fn gc_terminal(&self) -> usize {
         let terminal_keys: Vec<u64> = self
             .map
@@ -193,6 +109,7 @@ mod tests {
     fn sample_entry(seq: u64) -> Arc<LogEntry> {
         Arc::new(LogEntry::new(
             seq,
+            1,
             seq * 1000,
             InboundCommand::NewOrder {
                 account: AccountId(1),

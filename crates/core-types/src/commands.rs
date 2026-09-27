@@ -51,9 +51,6 @@ pub struct CancelOrder {
     pub order_id: OrderId,
 }
 
-/// Request to reduce or replace the quantity of a resting order
-/// without changing its price/time priority position is NOT
-/// guaranteed â€” engines typically treat this as cancel-replace.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ModifyOrder {
@@ -210,9 +207,19 @@ impl TryFrom<Command> for InboundCommand {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SequencedCommand {
+    pub term: u64,
     pub seq: u64,
     pub ts_ns: u64,
     pub cmd: InboundCommand,
+}
+
+impl SequencedCommand {
+    /// Lexicographic (term, seq) ordering key. Use this instead of deriving
+    /// `Ord` on the whole struct — `ts_ns`/`cmd` must never affect ordering.
+    #[inline]
+    pub fn order_key(&self) -> (u64, u64) {
+        (self.term, self.seq)
+    }
 }
 
 #[cfg(test)]

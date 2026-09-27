@@ -1,66 +1,19 @@
-// Write-ahead log append and sync operations
-//! Append-only WAL writer backed by an mmap'd file.
-//!
-//! # File layout
-//!
-//! ```text
-//! [ FILE HEADER (32 bytes) ]
-//! [ RECORD 0               ]
-//! [ RECORD 1               ]
-//! ...
-//! ```
-//!
-//! ## File header (32 bytes)
-//! ```text
-//! magic:     [u8; 8]   "MREWAL01"
-//! version:   u32       = 1
-//! reserved:  [u8; 20]
-//! ```
-//!
-//! ## Record layout
-//! ```text
-//! seq:       u64        — global monotonic sequence number
-//! ts_ns:     u64        — hardware timestamp at sequencing time
-//! len:       u32        — byte length of the rkyv-serialised payload
-//! crc32:     u32        — CRC32 of the payload bytes
-//! payload:   [u8; len]  — rkyv archive of InboundCommand
-//! padding:   [u8; ?]    — zero bytes to align next record to 8 bytes
-//! ```
-//!
-//! # Design choices
-//! - **mmap + `msync`**: the OS page cache absorbs bursts; we call `msync` on
-//!   each record for durability. On Linux with `MAP_SHARED` this is equivalent
-//!   to a `fdatasync` of the dirty pages.
-//! - **No framing delimiters**: record boundaries are found by reading `len`
-//!   from the fixed-offset header of each record. A torn `len` field is
-//!   detected by the CRC32 of the payload.
-//! - **Zero heap allocation per write**: the rkyv serialiser writes directly
-//!   into a stack-allocated scratch buffer that is then `copy_from_slice`'d
-//!   into the mmap region.
-//! - **Single writer**: `FileWalWriter` is `!Sync`. The WAL writer runs on its
-//!   own thread and receives `SequencedCommand`s via an SPSC queue.
-
 use std::fs::OpenOptions;
 use std::path::Path;
 
-use memmap2::MmapMut;
 use crc32fast::Hasher as Crc32Hasher;
+use memmap2::MmapMut;
 use thiserror::Error;
 
-use core_types::{InboundCommand, SequencedCommand};
 use core_types::events::Event;
+use core_types::{InboundCommand, SequencedCommand};
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
 const MAGIC: &[u8; 8] = b"MREWAL01";
-const VERSION: u32     = 1;
+const VERSION: u32 = 2;
 const FILE_HEADER_SIZE: usize = 32;
-
-/// Fixed overhead per record: seq(8) + ts_ns(8) + len(4) + crc32(4) = 24 bytes.
-const RECORD_HEADER_SIZE: usize = 24;
-
-
-/// Default mmap file capacity: 512 MiB.
+const RECORD_HEADER_SIZE: usize = 32;
 const DEFAULT_FILE_CAPACITY: usize = 512 * 1024 * 1024;
 
 // ── Error ────────────────────────────────────────────────────────────────────
@@ -73,6 +26,8 @@ pub enum WalError {
     CapacityExhausted { capacity: usize, needed: usize },
     #[error("serialisation error: {0}")]
     Serialise(String),
+    #[error("stale fencing term: got {got}, highest seen {highest}")]
+    StaleTerm { got: u64, highest: u64 },
     #[error("invalid magic bytes in WAL file header")]
     InvalidMagic,
     #[error("unsupported WAL version: {0}")]
@@ -122,22 +77,23 @@ pub struct NullWal;
 
 impl WalWriter for NullWal {
     type Error = std::convert::Infallible;
-    fn append_event(&mut self, _ev: &Event) -> Result<(), Self::Error> { Ok(()) }
-    fn flush(&mut self) -> Result<(), Self::Error> { Ok(()) }
+    fn append_event(&mut self, _ev: &Event) -> Result<(), Self::Error> {
+        Ok(())
+    }
+    fn flush(&mut self) -> Result<(), Self::Error> {
+        Ok(())
+    }
 }
 
 // ── FileWalWriter ────────────────────────────────────────────────────────────
 
-/// Append-only WAL writer backed by an mmap'd file. Single-writer: `!Sync`.
 pub struct FileWalWriter {
-    mmap:   MmapMut,
-    /// Byte offset of the next record to write (starts after file header).
+    mmap: MmapMut,
     cursor: usize,
     config: WalWriterConfig,
-    /// Last sequence number written (for monotonicity assertions).
     last_seq: u64,
+    highest_term: u64,
 }
-
 
 impl FileWalWriter {
     /// Open or create a WAL file at `path`.
@@ -168,65 +124,91 @@ impl FileWalWriter {
         }
 
         // Scan to find the cursor position (end of last complete record).
-        let (cursor, last_seq) = if is_new {
-            (FILE_HEADER_SIZE, 0)
+        let (cursor, last_seq, highest_term) = if is_new {
+            (FILE_HEADER_SIZE, 0, 0)
         } else {
             scan_to_end(&mmap)?
         };
 
-        Ok(Self { mmap, cursor, config, last_seq })
+        Ok(Self {
+            mmap,
+            cursor,
+            config,
+            last_seq,
+            highest_term,
+        })
     }
 
     /// Append one `SequencedCommand` to the WAL.
     ///
     /// Returns the byte offset of the record just written.
     pub fn append(&mut self, sc: &SequencedCommand) -> Result<usize, WalError> {
-    debug_assert!(
-        sc.seq > self.last_seq,
-        "WAL: sequence numbers must be strictly increasing (got {} after {})",
-        sc.seq, self.last_seq
-    );
+        if sc.term < self.highest_term {
+            eprintln!(
+                "[wal] dropping stale-term record: seq={} term={} < highest_term={}",
+                sc.seq, sc.term, self.highest_term
+            );
+            return Err(WalError::StaleTerm {
+                got: sc.term,
+                highest: self.highest_term,
+            });
+        }
+        self.highest_term = sc.term;
 
-    let payload = serialise_command(&sc.cmd)?;
-    self.write_record(sc.seq, sc.ts_ns, &payload)
-}
+        debug_assert!(
+            sc.seq > self.last_seq,
+            "WAL: sequence numbers must be strictly increasing (got {} after {})",
+            sc.seq,
+            self.last_seq
+        );
 
-/// Writes one record (header + payload + padding) at the current cursor,
-/// advances the cursor, and updates `last_seq`. Shared by `append` and
-/// `append_event`.
-fn write_record(&mut self, seq: u64, ts_ns: u64, payload: &[u8]) -> Result<usize, WalError> {
-    let payload_len = payload.len();
-    let record_size = align8(RECORD_HEADER_SIZE + payload_len);
-    let end = self.cursor + record_size;
-
-    if end > self.mmap.len() {
-        return Err(WalError::CapacityExhausted {
-            capacity: self.mmap.len(),
-            needed:   end,
-        });
+        let payload = serialise_command(&sc.cmd)?;
+        self.write_record(sc.seq, sc.term, sc.ts_ns, &payload)
     }
 
-    let crc = crc32(payload);
-    let offset = self.cursor;
-    let buf = &mut self.mmap[offset..offset + record_size];
+    /// Writes one record (header + payload + padding) at the current cursor,
+    /// advances the cursor, and updates `last_seq`. Shared by `append` and
+    /// `append_event`.
+    fn write_record(
+        &mut self,
+        seq: u64,
+        term: u64,
+        ts_ns: u64,
+        payload: &[u8],
+    ) -> Result<usize, WalError> {
+        let payload_len = payload.len();
+        let record_size = align8(RECORD_HEADER_SIZE + payload_len);
+        let end = self.cursor + record_size;
 
-    buf[0..8].copy_from_slice(&seq.to_le_bytes());
-    buf[8..16].copy_from_slice(&ts_ns.to_le_bytes());
-    buf[16..20].copy_from_slice(&(payload_len as u32).to_le_bytes());
-    buf[20..24].copy_from_slice(&crc.to_le_bytes());
-    buf[RECORD_HEADER_SIZE..RECORD_HEADER_SIZE + payload_len].copy_from_slice(payload);
-    for b in buf[RECORD_HEADER_SIZE + payload_len..].iter_mut() {
-        *b = 0;
+        if end > self.mmap.len() {
+            return Err(WalError::CapacityExhausted {
+                capacity: self.mmap.len(),
+                needed: end,
+            });
+        }
+
+        let crc = crc32(payload);
+        let offset = self.cursor;
+        let buf = &mut self.mmap[offset..offset + record_size];
+
+        buf[0..8].copy_from_slice(&seq.to_le_bytes());
+        buf[8..16].copy_from_slice(&ts_ns.to_le_bytes());
+        buf[16..20].copy_from_slice(&(payload_len as u32).to_le_bytes());
+        buf[20..24].copy_from_slice(&crc.to_le_bytes());
+        buf[24..32].copy_from_slice(&term.to_le_bytes());
+        buf[32..32 + payload_len].copy_from_slice(payload);
+        for b in buf[32 + payload_len..].iter_mut() {
+            *b = 0;
+        }
+
+        if self.config.sync_on_write {
+            self.mmap.flush_range(offset, record_size)?;
+        }
+
+        self.cursor = end;
+        self.last_seq = seq;
+        Ok(offset)
     }
-
-    if self.config.sync_on_write {
-        self.mmap.flush_range(offset, record_size)?;
-    }
-
-    self.cursor = end;
-    self.last_seq = seq;
-    Ok(offset)
-}
 
     /// Force an `msync` of all dirty pages regardless of `sync_on_write`.
     pub fn flush(&mut self) -> Result<(), WalError> {
@@ -234,18 +216,21 @@ fn write_record(&mut self, seq: u64, ts_ns: u64, payload: &[u8]) -> Result<usize
     }
 
     /// Current write cursor (bytes from file start).
-    pub fn cursor(&self) -> usize { self.cursor }
+    pub fn cursor(&self) -> usize {
+        self.cursor
+    }
 
     /// Last successfully written sequence number.
-    pub fn last_seq(&self) -> u64 { self.last_seq }
+    pub fn last_seq(&self) -> u64 {
+        self.last_seq
+    }
 }
 
 impl WalWriter for FileWalWriter {
     type Error = WalError;
     fn append_event(&mut self, ev: &Event) -> Result<(), Self::Error> {
-        let payload = bincode::serialize(ev)
-            .map_err(|e| WalError::Serialise(e.to_string()))?;
-        self.write_record(ev.seq().get(), now_ns(), &payload)?;
+        let payload = bincode::serialize(ev).map_err(|e| WalError::Serialise(e.to_string()))?;
+        self.write_record(ev.seq().get(), 0, now_ns(), &payload)?;
         Ok(())
     }
     fn flush(&mut self) -> Result<(), Self::Error> {
@@ -274,44 +259,39 @@ fn validate_file_header(mmap: &[u8]) -> Result<(), WalError> {
 
 // ── Record helpers ───────────────────────────────────────────────────────────
 
-/// Scan forward from `FILE_HEADER_SIZE`, reading records until we hit a zero
-/// seq (which marks the first unwritten byte). Returns `(cursor, last_seq)`.
-fn scan_to_end(mmap: &[u8]) -> Result<(usize, u64), WalError> {
+fn scan_to_end(mmap: &[u8]) -> Result<(usize, u64, u64), WalError> {
     let mut offset = FILE_HEADER_SIZE;
     let mut last_seq = 0u64;
+    let mut highest_term = 0u64;
 
     loop {
         if offset + RECORD_HEADER_SIZE > mmap.len() {
             break;
         }
-        let seq = u64::from_le_bytes(mmap[offset..offset+8].try_into().unwrap());
+        let seq = u64::from_le_bytes(mmap[offset..offset + 8].try_into().unwrap());
         if seq == 0 {
             break; // reached unwritten region
         }
-        let len = u32::from_le_bytes(
-            mmap[offset+16..offset+20].try_into().unwrap()
-        ) as usize;
-        let crc_stored = u32::from_le_bytes(
-            mmap[offset+20..offset+24].try_into().unwrap()
-        );
+        let len = u32::from_le_bytes(mmap[offset + 16..offset + 20].try_into().unwrap()) as usize;
+        let crc_stored = u32::from_le_bytes(mmap[offset + 20..offset + 24].try_into().unwrap());
+        let term = u64::from_le_bytes(mmap[offset + 24..offset + 32].try_into().unwrap());
 
         let payload_end = offset + RECORD_HEADER_SIZE + len;
         if payload_end > mmap.len() {
-            // Truncated record — stop here; recovery will replay up to last_seq.
-            break;
+            break; // truncated record — stop here
         }
 
         let crc_computed = crc32(&mmap[offset + RECORD_HEADER_SIZE..payload_end]);
         if crc_computed != crc_stored {
-            // Corrupt record — stop before it.
-            break;
+            break; // corrupt record — stop before it
         }
 
         last_seq = seq;
+        highest_term = term;
         offset += align8(RECORD_HEADER_SIZE + len);
     }
 
-    Ok((offset, last_seq))
+    Ok((offset, last_seq, highest_term))
 }
 
 /// Serialize `InboundCommand` using bincode into a Vec<u8>.
@@ -348,20 +328,21 @@ fn align8(n: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::NamedTempFile;
     use core_types::{AccountId, InboundCommand, OrderType, Price, Qty, Side, Symbol};
+    use tempfile::NamedTempFile;
 
     fn dummy_sc(seq: u64) -> SequencedCommand {
         SequencedCommand {
+            term: 1,
             seq,
             ts_ns: seq * 1_000,
             cmd: InboundCommand::NewOrder {
-                account:    AccountId(1),
+                account: AccountId(1),
                 client_order_id: core_types::ClientOrderId::new(0),
-                symbol:     Symbol(0),
-                side:       Side::Buy,
-                price:      Price(100_00000000),
-                qty:        Qty(1_00000000),
+                symbol: Symbol(0),
+                side: Side::Buy,
+                price: Price(100_00000000),
+                qty: Qty(1_00000000),
                 order_type: OrderType::Limit,
                 time_in_force: core_types::TimeInForce::Gtc,
             },
@@ -397,7 +378,7 @@ mod tests {
         };
         let mut writer = FileWalWriter::open(tmp.path(), config).unwrap();
         let _ = writer.append(&dummy_sc(1)); // may or may not fit
-        // Second append must eventually exhaust capacity.
+                                             // Second append must eventually exhaust capacity.
         let result = writer.append(&dummy_sc(2));
         // Either the first or second exhausts — at least one must fail.
         // We just verify no panic and the error type is correct if it fails.
@@ -408,10 +389,10 @@ mod tests {
 
     #[test]
     fn align8_correctness() {
-        assert_eq!(super::align8(0),  0);
-        assert_eq!(super::align8(1),  8);
-        assert_eq!(super::align8(8),  8);
-        assert_eq!(super::align8(9),  16);
+        assert_eq!(super::align8(0), 0);
+        assert_eq!(super::align8(1), 8);
+        assert_eq!(super::align8(8), 8);
+        assert_eq!(super::align8(9), 16);
         assert_eq!(super::align8(24), 24);
         assert_eq!(super::align8(25), 32);
     }

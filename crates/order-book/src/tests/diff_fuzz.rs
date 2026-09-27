@@ -238,6 +238,7 @@ fn gen_commands(rng: &mut StdRng, n: usize) -> Vec<SequencedCommand> {
         };
 
         cmds.push(SequencedCommand {
+            term: 1,
             seq,
             ts_ns: seq * 1000,
             cmd,

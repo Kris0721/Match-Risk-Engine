@@ -1,41 +1,3 @@
-//! Persistent-memory WAL writer using `clwb` + `sfence` for durability,
-//! instead of `msync`.
-//!
-//! # Why this exists
-//!
-//! `FileWalWriter` (see `log.rs`) calls `msync(MS_SYNC)` per record, which
-//! is a syscall that flushes dirty pages through the OS page cache. On
-//! real persistent memory (Optane DC PMM, CXL-attached PMEM, etc.) mapped
-//! via DAX, that syscall is unnecessary overhead: writes already land
-//! directly on the memory bus. All you need is:
-//!
-//!   1. `clwb` (cache-line write-back) — push the dirty cache line to the
-//!      memory controller's write-pending queue (ADR-backed, so it's
-//!      durable even on power loss on ADR-capable platforms) without
-//!      evicting it from cache (unlike `clflush`/`clflushopt`).
-//!   2. `sfence` — a store fence, so the `clwb`s from step 1 are
-//!      guaranteed to have completed before any store that follows this
-//!      point in program order (e.g. the "commit" write of a sequence
-//!      number) becomes visible.
-//!
-//! This is the standard `libpmem`/PMDK durability pattern, reimplemented
-//! directly against the `SequencedCommand` record format so we don't
-//! pull in PMDK as a dependency.
-//!
-//! # Requirements
-//!
-//! - CPU must support `clwb` (check `/proc/cpuinfo` flags on Linux, or
-//!   `__cpuid` leaf 7 EBX bit 24). Falls back to `clflushopt` if `clwb`
-//!   is unavailable and neither if that's unavailable either — see
-//!   `CacheFlush::detect()`.
-//! - The backing file should be a real DAX mapping (`mount -o dax` on an
-//!   `fsdax` namespace, or a `devdax` device) for the durability
-//!   guarantee to be real. On a normal filesystem this still runs
-//!   correctly but the "no syscall needed" guarantee doesn't hold —
-//!   the kernel may still be buffering under you.
-//! - x86-64 only. No ARM equivalent implemented here (would need `dc cvap`
-//!   / `dc cvadp` on ARMv8.2+).
-
 use std::arch::x86_64::{__cpuid_count, _mm_clflush, _mm_sfence};
 use std::fs::OpenOptions;
 use std::path::Path;
@@ -305,6 +267,7 @@ mod tests {
 
     fn sample_cmd(seq: u64) -> SequencedCommand {
         SequencedCommand {
+            term: 1,
             seq,
             ts_ns: 0,
             cmd: InboundCommand::NewOrder {

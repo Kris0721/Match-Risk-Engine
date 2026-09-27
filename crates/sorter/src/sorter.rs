@@ -168,7 +168,9 @@ impl Sorter {
                 OrderStatus::FinallyHandled => {
                     // Second Engine handled it — remove from ring and record.
                     self.pending_ring.remove(entry.seq);
-                    self.metrics.secondary_handled.fetch_add(1, Ordering::Relaxed);
+                    self.metrics
+                        .secondary_handled
+                        .fetch_add(1, Ordering::Relaxed);
                     self.metrics.gc_removed.fetch_add(1, Ordering::Relaxed);
                 }
                 OrderStatus::Unaddressed => {
@@ -191,10 +193,10 @@ impl Sorter {
     fn adaptive_timeout(&self) -> u64 {
         let load = self.load_monitor.primary_load_pct();
         match load {
-            0..=50  => 200_000,     // 200μs
-            51..=80 => 500_000,     // 500μs
-            81..=95 => 1_000_000,   // 1ms
-            _       => 2_000_000,   // 2ms
+            0..=50 => 200_000,    // 200μs
+            51..=80 => 500_000,   // 500μs
+            81..=95 => 1_000_000, // 1ms
+            _ => 2_000_000,       // 2ms
         }
     }
 
@@ -215,6 +217,7 @@ mod tests {
         // Create entry with timestamp_in = 0 so age is always `now_ns`
         Arc::new(LogEntry::new(
             seq,
+            1,
             0_u64.wrapping_sub(age_ns), // Will produce correct age when now_ns is large
             InboundCommand::NewOrder {
                 account: AccountId(1),
@@ -229,16 +232,15 @@ mod tests {
         ))
     }
 
-    fn mk_sorter() -> (Sorter, crossbeam_channel::Receiver<Arc<LogEntry>>, Arc<PendingRing>) {
+    fn mk_sorter() -> (
+        Sorter,
+        crossbeam_channel::Receiver<Arc<LogEntry>>,
+        Arc<PendingRing>,
+    ) {
         let ring = Arc::new(PendingRing::new());
         let (tx, rx) = crossbeam_channel::unbounded();
         let load = Arc::new(LoadMonitor::default());
-        let sorter = Sorter::new(
-            Arc::clone(&ring),
-            tx,
-            load,
-            SorterConfig::default(),
-        );
+        let sorter = Sorter::new(Arc::clone(&ring), tx, load, SorterConfig::default());
         (sorter, rx, ring)
     }
 
@@ -253,10 +255,7 @@ mod tests {
         sorter.scan_once();
 
         assert_eq!(ring.len(), 0);
-        assert_eq!(
-            sorter.metrics.primary_handled.load(Ordering::Relaxed),
-            1
-        );
+        assert_eq!(sorter.metrics.primary_handled.load(Ordering::Relaxed), 1);
     }
 
     #[test]
@@ -271,10 +270,7 @@ mod tests {
         sorter.scan_once();
 
         assert_eq!(ring.len(), 0);
-        assert_eq!(
-            sorter.metrics.secondary_handled.load(Ordering::Relaxed),
-            1
-        );
+        assert_eq!(sorter.metrics.secondary_handled.load(Ordering::Relaxed), 1);
     }
 
     #[test]
@@ -284,6 +280,7 @@ mod tests {
         // Create entry with timestamp_in close to now (very recent)
         let now_ns = sorter.clock_origin.elapsed().as_nanos() as u64;
         let entry = Arc::new(LogEntry::new(
+            1,
             1,
             now_ns, // Just created, age ≈ 0
             InboundCommand::NewOrder {
@@ -315,7 +312,8 @@ mod tests {
         // Create entry with timestamp_in far in the past so it times out
         let entry = Arc::new(LogEntry::new(
             1,
-             0, // timestamp_in = 0, age will be huge
+            1,
+            0, // timestamp_in = 0, age will be huge
             InboundCommand::NewOrder {
                 account: AccountId(1),
                 client_order_id: ClientOrderId::new(1),
@@ -335,10 +333,7 @@ mod tests {
         let escalated = rx.try_recv().expect("should have escalated entry");
         assert_eq!(escalated.seq, 1);
         assert_eq!(escalated.load_status(), OrderStatus::Unaddressed);
-        assert_eq!(
-            sorter.metrics.escalated.load(Ordering::Relaxed),
-            1
-        );
+        assert_eq!(sorter.metrics.escalated.load(Ordering::Relaxed), 1);
     }
 
     #[test]
@@ -347,12 +342,7 @@ mod tests {
         let (tx, _rx) = crossbeam_channel::unbounded();
         let load = Arc::new(LoadMonitor::default());
 
-        let sorter = Sorter::new(
-            ring,
-            tx,
-            Arc::clone(&load),
-            SorterConfig::default(),
-        );
+        let sorter = Sorter::new(ring, tx, Arc::clone(&load), SorterConfig::default());
 
         // No load → 200μs
         assert_eq!(sorter.adaptive_timeout(), 200_000);

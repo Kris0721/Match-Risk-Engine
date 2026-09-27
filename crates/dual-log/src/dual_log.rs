@@ -1,22 +1,3 @@
-//! Dual Write-Ahead Log — writes every order to two independent logs
-//! before any processing begins.
-//!
-//! # Architecture Doc §4.1 — Dual Log Write
-//!
-//! Every incoming order is written to **two independent logs simultaneously**
-//! before any processing begins. This ensures both engines always have the
-//! full order available, regardless of which one processes it.
-//!
-//! **Critical rule:** If either log write fails → order is **rejected entirely**
-//! and the user is asked to retry. No partial state ever exists.
-//!
-//! # Implementation
-//!
-//! We wrap two `FileWalWriter` instances (Log A for Primary, Log B for Secondary).
-//! Since `mmap` provides in-memory semantics with OS-managed writeback, this gives
-//! us the "in-memory ring buffer with async disk flush" described in the architecture
-//! without introducing a separate async runtime.
-
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -26,7 +7,7 @@ use core_types::commands::InboundCommand;
 use core_types::log_entry::LogEntry;
 use core_types::SequencedCommand;
 
-use wal::log::{FileWalWriter, WalWriterConfig, WalError};
+use wal::log::{FileWalWriter, WalError, WalWriterConfig};
 
 use crate::pending_ring::PendingRing;
 
@@ -73,36 +54,15 @@ impl Default for DualLogConfig {
     }
 }
 
-/// The Dual Log writer — the entry point for all orders into the system.
-///
-/// Holds two independent WAL writers and a global atomic sequence counter.
-/// Every order gets a unique, monotonically increasing sequence number
-/// via `fetch_add`, then is written to both logs before being pushed
-/// to the pending ring for engine processing.
-///
-/// # Thread model
-///
-/// `DualLog` is `!Sync` (the `FileWalWriter` is `!Sync`). It runs on
-/// a single dedicated writer thread. Orders arrive via a channel from
-/// the gateway/router, and the writer thread calls `write()` for each.
 pub struct DualLog {
-    /// Log A — Primary Engine's working input.
     log_a: FileWalWriter,
-    /// Log B — Secondary Engine's working input (identical copy).
     log_b: FileWalWriter,
-    /// Global sequence counter. `fetch_add(1, SeqCst)` yields unique IDs.
-    seq_counter: AtomicU64,
-    /// Pending ring buffer — populated after successful dual write.
+    last_assigned_seq: u64,
     pending_ring: Arc<PendingRing>,
-    /// Clock origin for nanosecond timestamps.
     clock_origin: Instant,
 }
 
 impl DualLog {
-    /// Open or create a dual log system at the given paths.
-    ///
-    /// `log_a_path` is the Primary Engine's log file.
-    /// `log_b_path` is the Secondary Engine's log file.
     pub fn open(
         log_a_path: impl AsRef<Path>,
         log_b_path: impl AsRef<Path>,
@@ -113,66 +73,52 @@ impl DualLog {
             .map_err(DualLogError::LogAFailed)?;
         let log_b = FileWalWriter::open(log_b_path, config.log_b_config)
             .map_err(DualLogError::LogBFailed)?;
-
-        // Start sequence counter after the last written sequence in either log.
-        let start_seq = log_a.last_seq().max(log_b.last_seq());
+        let last_assigned_seq = log_a.last_seq().max(log_b.last_seq());
 
         Ok(Self {
             log_a,
             log_b,
-            seq_counter: AtomicU64::new(start_seq),
+            last_assigned_seq,
             pending_ring,
             clock_origin: Instant::now(),
         })
     }
 
-    /// Write an order to both logs and push to the pending ring.
-    ///
-    /// # Atomicity guarantee
-    ///
-    /// If either log write fails, the other is rolled back (the entry is
-    /// not added to the pending ring). The caller should reject the order
-    /// and ask the user to retry.
-    ///
-    /// Returns the `LogEntry` wrapped in an `Arc` for shared ownership
-    /// between the pending ring, engines, and sorter.
-    pub fn write(&mut self, cmd: InboundCommand) -> Result<Arc<LogEntry>, DualLogError> {
-        // Generate globally unique sequence number (Architecture Doc §5, Op #1).
-        let seq = self.seq_counter.fetch_add(1, Ordering::SeqCst) + 1;
+    /// `term`/`seq` are assigned upstream by the `Sequencer` — this is the
+    /// downstream escalation/backup layer, not a competing sequencer.
+    pub fn write(
+        &mut self,
+        term: u64,
+        seq: u64,
+        cmd: InboundCommand,
+    ) -> Result<Arc<LogEntry>, DualLogError> {
+        debug_assert!(
+            seq > self.last_assigned_seq,
+            "DualLog: received non-monotonic seq {seq} after {}",
+            self.last_assigned_seq
+        );
+        self.last_assigned_seq = seq;
         let ts_ns = self.clock_origin.elapsed().as_nanos() as u64;
 
-        // Create the log entry with Pending status.
-        let entry = Arc::new(LogEntry::new(seq, ts_ns, cmd.clone()));
-
-        // Build the SequencedCommand for the WAL writers.
+        let entry = Arc::new(LogEntry::new(seq, term, ts_ns, cmd.clone()));
         let sc = SequencedCommand {
+            term,
             seq,
             ts_ns,
             cmd,
         };
 
-        // Write to both logs. If either fails, rollback and reject.
         let res_a = self.log_a.append(&sc);
         let res_b = self.log_b.append(&sc);
 
         match (res_a, res_b) {
             (Ok(_), Ok(_)) => {
-                // Both succeeded — push to pending ring.
                 self.pending_ring.push(Arc::clone(&entry));
                 Ok(entry)
             }
             (Err(a), Err(b)) => Err(DualLogError::BothFailed { a, b }),
-            (Err(a), Ok(_)) => {
-                // Log A failed, Log B succeeded.
-                // In a full implementation we'd rollback Log B here.
-                // For now, the entry is simply not added to the pending ring.
-                Err(DualLogError::LogAFailed(a))
-            }
-            (Ok(_), Err(b)) => {
-                // Log B failed, Log A succeeded.
-                // In a full implementation we'd rollback Log A here.
-                Err(DualLogError::LogBFailed(b))
-            }
+            (Err(a), Ok(_)) => Err(DualLogError::LogAFailed(a)),
+            (Ok(_), Err(b)) => Err(DualLogError::LogBFailed(b)),
         }
     }
 
@@ -183,7 +129,7 @@ impl DualLog {
 
     /// Current sequence number (last assigned).
     pub fn current_seq(&self) -> u64 {
-        self.seq_counter.load(Ordering::SeqCst)
+        self.last_assigned_seq
     }
 
     /// Flush both logs to disk.
@@ -207,10 +153,10 @@ impl DualLog {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use core_types::order_status::OrderStatus;
     use core_types::{
         AccountId, ClientOrderId, InboundCommand, OrderType, Price, Qty, Side, Symbol, TimeInForce,
     };
-    use core_types::order_status::OrderStatus;
     use tempfile::TempDir;
 
     fn sample_cmd() -> InboundCommand {
@@ -252,7 +198,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let mut dl = mk_dual_log(&dir);
 
-        let entry = dl.write(sample_cmd()).expect("dual write failed");
+        let entry = dl.write(1, 1, sample_cmd()).expect("dual write failed");
 
         // Entry should be Pending
         assert_eq!(entry.load_status(), OrderStatus::Pending);
@@ -272,9 +218,9 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let mut dl = mk_dual_log(&dir);
 
-        let e1 = dl.write(sample_cmd()).unwrap();
-        let e2 = dl.write(sample_cmd()).unwrap();
-        let e3 = dl.write(sample_cmd()).unwrap();
+        let e1 = dl.write(1, 1, sample_cmd()).unwrap();
+        let e2 = dl.write(1, 2, sample_cmd()).unwrap();
+        let e3 = dl.write(1, 3, sample_cmd()).unwrap();
 
         assert_eq!(e1.seq, 1);
         assert_eq!(e2.seq, 2);
@@ -287,8 +233,8 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let mut dl = mk_dual_log(&dir);
 
-        for _ in 0..10 {
-            dl.write(sample_cmd()).unwrap();
+        for i in 1..10 {
+            dl.write(1, i, sample_cmd()).unwrap();
         }
 
         let (ca, cb) = dl.cursors();
