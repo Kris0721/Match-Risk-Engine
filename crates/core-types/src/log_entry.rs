@@ -94,8 +94,8 @@ impl LogEntry {
     ) {
         self.fill_price.store(fill_price, Ordering::Release);
         self.filled_qty.store(filled_qty, Ordering::Release);
-        self.handled_by.store(engine_id, Ordering::Release);
         self.timestamp_out.store(timestamp_out, Ordering::Release);
+        self.handled_by.store(engine_id, Ordering::Release);
     }
 
     /// Age of this entry in nanoseconds relative to `now_ns`.

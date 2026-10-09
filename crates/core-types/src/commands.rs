@@ -115,7 +115,7 @@ impl Command {
 /// engine-internal representation consumed by the sequencer and routed
 /// to matching engines. It carries inline fields rather than wrapping
 /// request structs, for cache-friendly `Copy`-ability on the hot path.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Copy)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum InboundCommand {
     NewOrder {
@@ -205,7 +205,7 @@ impl TryFrom<Command> for InboundCommand {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Copy)]
 pub struct SequencedCommand {
     pub term: u64,
     pub seq: u64,

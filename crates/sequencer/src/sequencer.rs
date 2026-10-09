@@ -200,11 +200,11 @@ impl<C: Clock> Sequencer<C> {
             term,
             seq,
             ts_ns,
-            cmd: cmd.clone(),
+            cmd: cmd,
         };
 
         // --- WAL write (best-effort, non-blocking) ---
-        if self.wal_out.try_push(sequenced.clone()).is_err() {
+        if self.wal_out.try_push(sequenced).is_err() {
             // WAL writer is falling behind. In production: increment a counter,
             // alert ops, consider halting. Here we continue (the WAL writer
             // must be sized to handle peak throughput).
@@ -221,7 +221,7 @@ impl<C: Clock> Sequencer<C> {
                 // Spin on full ME queue — the matching engine must never be starved.
                 // In practice the queue should be large enough that this never spins.
                 loop {
-                    match self.me_inbound[idx].try_push(sequenced.clone()) {
+                    match self.me_inbound[idx].try_push(sequenced) {
                         Ok(()) => break,
                         Err(_) => std::hint::spin_loop(),
                     }
@@ -237,7 +237,7 @@ impl<C: Clock> Sequencer<C> {
                     // the rest are harmless no-ops.
                     for me in self.me_inbound.iter_mut() {
                         loop {
-                            match me.try_push(sequenced.clone()) {
+                            match me.try_push(sequenced) {
                                 Ok(()) => break,
                                 Err(_) => std::hint::spin_loop(),
                             }
