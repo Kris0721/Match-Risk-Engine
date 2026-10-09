@@ -125,33 +125,23 @@ impl RiskShard {
                     let state = self.states.get(acct.0)
                         .expect("process_event: owned account outside table capacity — shard/table misconfiguration");
                     let s = state.read();
+                    let breach = used_margin > balance;
+
                     state.update(
                         balance,
                         used_margin,
-                        s.frozen,
+                        s.frozen || breach,
                         s.halted,
                         s.position,
                         s.open_order_count,
                     );
-
-                    if used_margin > balance {
+                    if breach {
                         liquidate_cmds.push(InboundCommand::Liquidate {
                             account: acct,
                             symbol,
                         });
-                        // Freeze the account immediately so no new orders slip through.
-                        let s2 = state.read();
-                        state.update(
-                            balance,
-                            used_margin,
-                            true,
-                            s2.halted,
-                            s2.position,
-                            s2.open_order_count,
-                        );
                     }
                 }
-
                 liquidate_cmds
             }
 

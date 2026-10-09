@@ -125,6 +125,7 @@ impl<W: WalWriter> MatchingEngine<W> {
     pub fn handle_command(&mut self, cmd: SequencedCommand) {
         if cmd.term < self.highest_term_seen {
             logger::warn("matching-engine: dropping stale-term command (zombie leader)");
+            self.highest_term_seen = self.highest_term_seen.max(cmd.term);
             return;
         }
         let start = Instant::now();
